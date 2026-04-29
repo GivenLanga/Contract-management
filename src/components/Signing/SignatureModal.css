@@ -1,0 +1,123 @@
+.sig-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.65); backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center; z-index: 1100; padding: 24px;
+}
+
+.sig-modal {
+  background: #fff; border-radius: 20px; width: 100%; max-width: 640px;
+  max-height: 90vh; overflow: hidden; display: flex; flex-direction: column;
+  box-shadow: 0 32px 64px rgba(0,0,0,.35);
+}
+
+.sig-modal-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  padding: 22px 26px; border-bottom: 1px solid #e2e8f0; flex-shrink: 0;
+}
+.sig-modal-header h2 { font-size: 20px; font-weight: 700; color: #1a2744; margin: 0 0 2px; }
+.sig-modal-header p { font-size: 13px; color: #64748b; margin: 0; }
+
+.modal-close {
+  width: 32px; height: 32px; border-radius: 50%; border: none;
+  background: #f1f5f9; cursor: pointer; font-size: 16px; color: #64748b;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.modal-close:hover { background: #e2e8f0; }
+
+.sig-modal-body { padding: 22px 26px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; flex: 1; }
+
+.sig-info-bar {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  background: #f0f9ff; border-radius: 8px; font-size: 13px; color: #0369a1;
+}
+.sig-role-tag {
+  background: #dbeafe; color: #1d4ed8; font-size: 11px; font-weight: 600;
+  padding: 3px 10px; border-radius: 20px; margin-left: auto;
+}
+
+.sig-role-field { display: flex; flex-direction: column; gap: 6px; }
+.sig-role-field label { font-size: 13px; font-weight: 600; color: #374151; }
+.sig-role-field input {
+  padding: 10px 14px; border: 1.5px solid #d1d5db; border-radius: 8px; font-size: 14px;
+}
+.sig-role-field input:focus { outline: none; border-color: #2563eb; }
+
+.sig-section h3 { font-size: 15px; font-weight: 700; color: #1a2744; margin: 0 0 12px; }
+.sig-section--initials h3 { font-size: 14px; }
+.sig-optional { font-size: 12px; font-weight: 400; color: #94a3b8; }
+
+.sig-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.sig-tab {
+  padding: 7px 16px; border-radius: 8px; border: 1.5px solid #e2e8f0;
+  background: #fff; font-size: 13px; font-weight: 500; cursor: pointer; color: #64748b;
+  transition: all 0.15s;
+}
+.sig-tab--active { border-color: #2563eb; background: #eff6ff; color: #2563eb; font-weight: 700; }
+
+.sig-canvas-wrap { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.sig-canvas {
+  border: 2px solid #e2e8f0; border-radius: 10px; cursor: crosshair;
+  touch-action: none; background: #fafafa; width: 100%; max-width: 560px;
+  box-shadow: inset 0 2px 6px rgba(0,0,0,.04);
+}
+.sig-canvas--initials { max-width: 180px; }
+.sig-clear-btn {
+  font-size: 12px; padding: 5px 14px; border-radius: 6px; border: 1.5px solid #d1d5db;
+  background: #fff; cursor: pointer; color: #64748b;
+}
+.sig-clear-btn:hover { background: #f1f5f9; }
+.sig-hint { font-size: 12px; color: #94a3b8; margin: 0; }
+
+.sig-upload-area { border: 2px dashed #d1d5db; border-radius: 12px; overflow: hidden; }
+.sig-upload-label { display: block; cursor: pointer; }
+.sig-upload-placeholder {
+  padding: 32px; text-align: center; color: #94a3b8; display: flex;
+  flex-direction: column; align-items: center; gap: 8px;
+}
+.sig-upload-placeholder span:first-child { font-size: 32px; }
+.sig-upload-placeholder p { font-size: 14px; color: #64748b; margin: 0; }
+.sig-upload-placeholder span:last-child { font-size: 12px; }
+.sig-preview { max-height: 160px; width: 100%; object-fit: contain; padding: 16px; }
+
+.sig-type-area { display: flex; flex-direction: column; gap: 12px; }
+.sig-type-input {
+  padding: 12px 16px; border: 1.5px solid #d1d5db; border-radius: 8px; font-size: 16px;
+}
+.sig-type-input:focus { outline: none; border-color: #2563eb; }
+.sig-type-preview {
+  font-family: 'Georgia', 'Times New Roman', serif; font-style: italic; font-size: 40px;
+  color: #1a2744; padding: 16px; border: 1.5px solid #e2e8f0; border-radius: 8px;
+  min-height: 80px; background: #fafafa; line-height: 1;
+}
+
+.sig-initials-wrap { display: flex; align-items: center; gap: 12px; }
+.sig-initials-actions { display: flex; flex-direction: column; gap: 6px; }
+.sig-upload-btn {
+  font-size: 12px; padding: 5px 14px; border-radius: 6px; border: 1.5px solid #d1d5db;
+  background: #fff; cursor: pointer; color: #64748b; text-align: center;
+}
+.sig-upload-btn:hover { background: #f1f5f9; }
+
+.sig-error {
+  background: #fef2f2; border: 1px solid #fca5a5; color: #dc2626;
+  border-radius: 8px; padding: 12px 16px; font-size: 14px;
+}
+
+.sig-modal-footer {
+  padding: 18px 26px; border-top: 1px solid #e2e8f0; flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.sig-legal-notice { font-size: 11px; color: #94a3b8; line-height: 1.6; }
+.sig-actions { display: flex; gap: 12px; justify-content: flex-end; }
+
+.sig-btn {
+  padding: 11px 24px; border-radius: 10px; font-size: 15px; font-weight: 600;
+  cursor: pointer; border: none; transition: all 0.2s;
+}
+.sig-btn--cancel { background: #f1f5f9; color: #374151; }
+.sig-btn--cancel:hover { background: #e2e8f0; }
+.sig-btn--sign {
+  background: linear-gradient(135deg, #1a2744 0%, #2563eb 100%);
+  color: #fff; padding: 11px 32px;
+}
+.sig-btn--sign:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(37,99,235,.4); }
+.sig-btn--sign:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }

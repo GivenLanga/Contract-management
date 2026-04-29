@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contractiq.local/schemas/signing-document-metadata.schema.json",
+  "title": "SigningDocumentMetadata",
+  "type": "object",
+  "required": ["documentId", "version", "sourceFileHash", "status", "fields", "auditTrail"],
+  "properties": {
+    "documentId": { "type": "string" },
+    "version": { "type": "integer", "minimum": 1 },
+    "sourceFileHash": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "prepared", "needs_review", "pending", "signed", "finalized", "voided"]
+    },
+    "fields": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "page", "x", "y", "width", "height", "source", "confidence"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string", "enum": ["signature", "initials", "date", "text"] },
+          "page": { "type": "integer", "minimum": 1 },
+          "x": { "type": "number", "minimum": 0 },
+          "y": { "type": "number", "minimum": 0 },
+          "width": { "type": "number", "exclusiveMinimum": 0 },
+          "height": { "type": "number", "exclusiveMinimum": 0 },
+          "coordinateOrigin": { "type": "string", "enum": ["pdf", "top-left"], "default": "pdf" },
+          "assignedTo": { "type": "string" },
+          "role": { "type": "string" },
+          "required": { "type": "boolean" },
+          "filled": { "type": "boolean" },
+          "source": {
+            "type": "string",
+            "enum": ["anchor", "layoutlmv3", "textract", "opencv-ocr", "heuristic-keyword", "heuristic-default", "manual"]
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "anchor": { "type": "string" },
+          "context": { "type": "string" },
+          "detection": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "properties": {
+        "mode": { "type": "string", "enum": ["parallel", "sequential"] },
+        "signers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["email"],
+            "properties": {
+              "email": { "type": "string", "format": "email" },
+              "name": { "type": "string" },
+              "role": { "type": "string" },
+              "order": { "type": "integer", "minimum": 1 },
+              "authMethod": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "auditTrail": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["eventId", "type", "timestamp"],
+        "properties": {
+          "eventId": { "type": "string" },
+          "type": { "type": "string" },
+          "actorEmail": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "ipAddress": { "type": "string" },
+          "userAgent": { "type": "string" },
+          "fieldId": { "type": "string" },
+          "evidence": {
+            "type": "object",
+            "properties": {
+              "signatureMethod": { "type": "string" },
+              "signatureImageHash": { "type": "string" },
+              "initialsImageHash": { "type": "string" },
+              "strokeHash": { "type": "string" },
+              "strokeCount": { "type": "integer" },
+              "pointCount": { "type": "integer" },
+              "durationMs": { "type": ["number", "null"] },
+              "pressure": { "type": ["object", "null"] },
+              "riskScore": { "type": "number" },
+              "warnings": { "type": "array", "items": { "type": "string" } }
+            },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "finalization": {
+      "type": "object",
+      "properties": {
+        "finalPdfHash": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+        "flattenedHash": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+        "certificateFingerprint": { "type": "string" },
+        "digitalSignatureStatus": { "type": "string", "enum": ["signed", "skipped", "failed"] },
+        "signatureStandard": { "type": "string" },
+        "signedAt": { "type": "string", "format": "date-time" },
+        "timestampAuthority": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

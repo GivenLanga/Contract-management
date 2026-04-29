@@ -1,0 +1,102 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  font-weight: 600;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.badge--md {
+  font-size: 11px;
+  padding: 3px 10px;
+}
+
+.badge--sm {
+  font-size: 10px;
+  padding: 2px 8px;
+}
+
+.badge--lg {
+  font-size: 13px;
+  padding: 5px 14px;
+}
+
+/* Status variants */
+.badge--active {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.badge--draft {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.badge--under-review {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.badge--pending-signature {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.badge--expired {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.badge--terminated {
+  background: #fce7f3;
+  color: #9d174d;
+}
+
+.badge--executed {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+/* Priority */
+.badge--high {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.badge--medium {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.badge--low {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+/* Types */
+.badge--msa,
+.badge--sow,
+.badge--license,
+.badge--vendor,
+.badge--nda,
+.badge--dpa,
+.badge--employment,
+.badge--partnership,
+.badge--addendum,
+.badge--assistance,
+.badge--consultancy,
+.badge--loan,
+.badge--service,
+.badge--agreement,
+.badge--imported {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+/* Stage */
+.badge--authoring { background: #f1f5f9; color: #64748b; }
+.badge--review { background: #fef3c7; color: #b45309; }
+.badge--negotiation { background: #fef3c7; color: #b45309; }
+.badge--approval { background: #ede9fe; color: #6d28d9; }
+.badge--signature { background: #ede9fe; color: #6d28d9; }
+.badge--execution { background: #dcfce7; color: #15803d; }

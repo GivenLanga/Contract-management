@@ -1,0 +1,253 @@
+import { useState, useRef } from 'react';
+import {
+  buildLegalFolderImport,
+  clearLegalFolderImport,
+  collectFilesFromDirectoryHandle,
+  enrichLegalFolderEntries,
+  entriesFromFileList,
+  getLegalFolderImport,
+  saveLegalFolderImport,
+} from '../../services/legalFolderStore';
+import { clearLegalFolderFiles, replaceLegalFolderFiles } from '../../services/legalFolderFileStore';
+import './LegalFolder.css';
+
+export default function LegalFolder() {
+  const initialSnapshot = getLegalFolderImport();
+  const folderInputRef = useRef(null);
+  const [docs, setDocs] = useState(initialSnapshot.documents || []);
+  const [total, setTotal] = useState(initialSnapshot.documents?.length || 0);
+  const [importing, setImporting] = useState(false);
+  const [syncError, setSyncError] = useState('');
+  const [source, setSource] = useState(initialSnapshot.source || null);
+  const [search, setSearch] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
+
+  const applySnapshot = (snapshot) => {
+    setDocs(snapshot.documents || []);
+    setTotal(snapshot.documents?.length || 0);
+    setSource(snapshot.source || null);
+  };
+
+  const syncEntries = async (entries, sourceName) => {
+    const enrichedEntries = await enrichLegalFolderEntries(entries);
+    const snapshot = buildLegalFolderImport(enrichedEntries, sourceName);
+    const fileCache = await replaceLegalFolderFiles(snapshot.documents, enrichedEntries);
+    const snapshotWithCache = {
+      ...snapshot,
+      source: {
+        ...snapshot.source,
+        fileCacheCount: fileCache.stored,
+      },
+    };
+    saveLegalFolderImport(snapshotWithCache);
+    applySnapshot(snapshotWithCache);
+    setSyncError('');
+  };
+
+  const handleChooseFolder = async () => {
+    setImporting(true);
+    setSyncError('');
+
+    try {
+      if ('showDirectoryPicker' in window) {
+        const directoryHandle = await window.showDirectoryPicker({ mode: 'read' });
+        const entries = await collectFilesFromDirectoryHandle(directoryHandle);
+        await syncEntries(entries, directoryHandle.name);
+      } else {
+        folderInputRef.current?.click();
+      }
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        setSyncError(error?.name === 'QuotaExceededError'
+          ? 'The folder is too large for browser file preview storage. Try a smaller shared folder.'
+          : 'Could not read that folder. Please choose a folder you can access.');
+      }
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleFolderInput = async (event) => {
+    const entries = entriesFromFileList(event.target.files);
+    const firstPath = entries[0]?.relativePath || '';
+    const sourceName = firstPath.split('/')[0] || 'Shared Folder';
+
+    setImporting(true);
+    setSyncError('');
+
+    try {
+      if (entries.length) {
+        await syncEntries(entries, sourceName);
+      }
+    } catch (error) {
+      setSyncError(error?.name === 'QuotaExceededError'
+        ? 'The folder is too large for browser file preview storage. Try a smaller shared folder.'
+        : 'Could not read that folder. Please choose a folder you can access.');
+    } finally {
+      event.target.value = '';
+      setImporting(false);
+    }
+  };
+
+  const handleDisconnect = () => {
+    clearLegalFolderImport();
+    clearLegalFolderFiles().catch(() => {});
+    setDocs([]);
+    setTotal(0);
+    setSource(null);
+    setSyncError('');
+  };
+
+  const filtered = docs.filter((d) => {
+    const matchesSearch = !search || d.name.toLowerCase().includes(search.toLowerCase());
+    const matchesType = !typeFilter || d.type === typeFilter;
+    return matchesSearch && matchesType;
+  });
+
+  const grouped = filtered.reduce((acc, doc) => {
+    const contract = doc.contract?.title || 'Uncategorized';
+    if (!acc[contract]) acc[contract] = [];
+    acc[contract].push(doc);
+    return acc;
+  }, {});
+
+  const sizeLabel = (bytes) => {
+    if (!bytes) return '';
+    if (bytes < 1048576) return `${(bytes / 1024).toFixed(0)} KB`;
+    return `${(bytes / 1048576).toFixed(1)} MB`;
+  };
+
+  return (
+    <div className="legal-folder">
+      <div className="legal-folder-header">
+        <div className="legal-folder-title">
+          <span className="legal-folder-icon">⚖</span>
+          <div>
+            <h1>Legal Folder</h1>
+            <p>
+              {source
+                ? `${total} document${total !== 1 ? 's' : ''} synced from ${source.name}`
+                : 'Connect a shared departmental folder to populate contracts'}
+            </p>
+          </div>
+        </div>
+        <div className="legal-folder-actions">
+          <button
+            className="legal-folder-btn legal-folder-btn--primary"
+            onClick={handleChooseFolder}
+            disabled={importing}
+          >
+            {importing ? 'Syncing...' : source ? 'Sync Shared Folder' : 'Choose Shared Folder'}
+          </button>
+          {source && (
+            <button className="legal-folder-btn legal-folder-btn--secondary" onClick={handleDisconnect}>
+              Disconnect
+            </button>
+          )}
+          <input
+            ref={folderInputRef}
+            className="legal-folder-input"
+            type="file"
+            multiple
+            webkitdirectory=""
+            directory=""
+            onChange={handleFolderInput}
+          />
+        </div>
+      </div>
+
+      {(source || syncError) && (
+        <div className={`legal-folder-source${syncError ? ' legal-folder-source--error' : ''}`}>
+          {syncError ? (
+            <span>{syncError}</span>
+          ) : (
+            <>
+              <span className="legal-folder-source__name">{source.name}</span>
+              <span>{source.contractCount} contract{source.contractCount !== 1 ? 's' : ''}</span>
+              <span>{source.fileCount} imported file{source.fileCount !== 1 ? 's' : ''}</span>
+              {source.fileCacheCount !== undefined && (
+                <span>{source.fileCacheCount} preview file{source.fileCacheCount !== 1 ? 's' : ''} ready</span>
+              )}
+              <span>{source.scannedFileCount || source.fileCount} scanned</span>
+              {source.skippedFileCount > 0 && (
+                <span>{source.skippedFileCount} skipped</span>
+              )}
+              <span>Last sync {new Date(source.syncedAt).toLocaleString()}</span>
+            </>
+          )}
+        </div>
+      )}
+
+      <div className="legal-folder-controls">
+        <div className="legal-search">
+          <span className="search-icon">🔍</span>
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search documents..."
+          />
+        </div>
+        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)}>
+          <option value="">All Types</option>
+          <option value="pdf">PDF</option>
+          <option value="docx">DOCX</option>
+          <option value="doc">DOC</option>
+          <option value="txt">TXT</option>
+          <option value="md">MD</option>
+          <option value="rtf">RTF</option>
+          <option value="csv">CSV</option>
+          <option value="json">JSON</option>
+        </select>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="legal-empty">
+          <div className="legal-empty-icon">📂</div>
+          <h3>{docs.length === 0 ? 'No shared folder connected' : 'No results match your search'}</h3>
+          <p>{docs.length === 0 ? 'Choose the department shared folder to sync contract records.' : 'Try a different search term.'}</p>
+          {docs.length === 0 && (
+            <button className="legal-folder-btn legal-folder-btn--primary" onClick={handleChooseFolder}>
+              Choose Shared Folder
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="legal-groups">
+          {Object.entries(grouped).map(([contract, contractDocs]) => (
+            <div key={contract} className="legal-group">
+              <div className="legal-group-header">
+                <span className="legal-group-icon">📁</span>
+                <h2>{contract}</h2>
+                <span className="legal-group-count">{contractDocs.length}</span>
+              </div>
+              <div className="legal-docs-grid">
+                {contractDocs.map((doc) => (
+                  <div key={doc._id} className="legal-doc-card">
+                    <div className="legal-doc-icon">
+                      {doc.type === 'pdf' ? '📄' : '📝'}
+                    </div>
+                    <div className="legal-doc-info">
+                      <div className="legal-doc-name">{doc.name}</div>
+                      <div className="legal-doc-meta">
+                        <span>{doc.type?.toUpperCase()}</span>
+                        <span>{sizeLabel(doc.size)}</span>
+                        <span>{new Date(doc.updatedAt).toLocaleDateString()}</span>
+                      </div>
+                      <div className="legal-doc-uploader">
+                        By {doc.uploadedBy?.name}
+                        {doc.status === 'Signed' && <span className="signed-badge">Signed</span>}
+                      </div>
+                    </div>
+                    <div className="legal-doc-actions">
+                      <span className="legal-doc-path" title={doc.sourcePath}>Shared</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

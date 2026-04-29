@@ -1,0 +1,164 @@
+.env-loading {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100vh; gap: 16px; color: #64748b;
+}
+.env-spinner {
+  width: 40px; height: 40px; border: 3px solid #e2e8f0;
+  border-top-color: #2563eb; border-radius: 50%; animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.env-root { min-height: 100vh; background: #f4f6f9; }
+
+.env-header {
+  display: flex; align-items: center; gap: 20px;
+  padding: 20px 40px; background: #1a2744; color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.3);
+}
+.env-back {
+  background: rgba(255,255,255,.1); border: none; color: #fff; padding: 8px 16px;
+  border-radius: 8px; font-size: 13px; cursor: pointer; white-space: nowrap;
+}
+.env-back:hover { background: rgba(255,255,255,.2); }
+.env-header-title h1 { font-size: 22px; font-weight: 700; margin: 0 0 2px; }
+.env-header-title p { font-size: 13px; opacity: .7; margin: 0; }
+
+.env-body { max-width: 800px; margin: 0 auto; padding: 32px 24px; display: flex; flex-direction: column; gap: 24px; }
+
+/* Document card */
+.env-doc-card {
+  display: flex; align-items: center; gap: 14px; padding: 16px 20px;
+  background: #fff; border-radius: 12px; border: 1.5px solid #e2e8f0;
+  box-shadow: 0 1px 4px rgba(0,0,0,.05);
+}
+.env-doc-icon { font-size: 28px; }
+.env-doc-info { flex: 1; }
+.env-doc-name { font-size: 16px; font-weight: 700; color: #1e293b; }
+.env-doc-meta { font-size: 12px; color: #94a3b8; margin-top: 3px; }
+.env-doc-status {
+  font-size: 11px; font-weight: 600; padding: 4px 12px; border-radius: 20px;
+  background: #dcfce7; color: #15803d;
+}
+
+/* Form */
+.env-form { display: flex; flex-direction: column; gap: 24px; }
+.env-error {
+  background: #fef2f2; border: 1px solid #fca5a5; color: #dc2626;
+  padding: 12px 16px; border-radius: 8px; font-size: 14px;
+}
+
+/* Sections */
+.env-section {
+  background: #fff; border-radius: 12px; padding: 22px 24px;
+  border: 1.5px solid #e2e8f0; box-shadow: 0 1px 4px rgba(0,0,0,.04);
+}
+.env-section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.env-section-title { font-size: 15px; font-weight: 700; color: #1a2744; margin: 0 0 16px; }
+.env-section-header .env-section-title { margin-bottom: 0; }
+.env-optional { font-size: 12px; font-weight: 400; color: #94a3b8; }
+
+/* Order options */
+.env-order-options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.env-order-card {
+  display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px;
+  border: 2px solid #e2e8f0; border-radius: 10px; cursor: pointer; transition: all .15s;
+}
+.env-order-card:hover { border-color: #93c5fd; background: #eff6ff; }
+.env-order-card--active { border-color: #2563eb; background: #eff6ff; }
+.env-order-icon { font-size: 22px; }
+.env-order-label { font-size: 14px; font-weight: 600; color: #1e293b; }
+.env-order-desc { font-size: 12px; color: #64748b; margin-top: 2px; }
+
+/* Signer rows */
+.env-add-btn {
+  padding: 7px 16px; background: #f1f5f9; border: 1.5px solid #d1d5db;
+  border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; color: #374151;
+}
+.env-add-btn:hover { background: #1a2744; color: #fff; border-color: #1a2744; }
+
+.env-signers-list { display: flex; flex-direction: column; gap: 16px; }
+.env-signer-row {
+  display: flex; gap: 14px; align-items: flex-start;
+  padding: 16px; background: #f8fafc; border-radius: 10px; border: 1.5px solid #e2e8f0;
+}
+.env-signer-number {
+  width: 28px; height: 28px; border-radius: 50%; background: #1a2744; color: #fff;
+  font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; margin-top: 22px;
+}
+.env-signer-fields { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+.env-field-row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
+
+.env-field { display: flex; flex-direction: column; gap: 5px; }
+.env-field--grow { flex: 1; min-width: 160px; }
+.env-field label { font-size: 12px; font-weight: 600; color: #374151; }
+.env-field input, .env-field select {
+  padding: 9px 12px; border: 1.5px solid #d1d5db; border-radius: 8px; font-size: 14px; background: #fff;
+}
+.env-field input:focus, .env-field select:focus { outline: none; border-color: #2563eb; }
+
+.env-remove-btn {
+  padding: 8px 12px; background: #fee2e2; border: none; border-radius: 8px;
+  color: #dc2626; cursor: pointer; font-size: 12px; align-self: flex-end;
+}
+.env-remove-btn:hover { background: #dc2626; color: #fff; }
+
+.env-signer-preview {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  background: #fff; border-radius: 8px; border: 1px solid #e2e8f0;
+}
+.env-signer-avatar {
+  width: 30px; height: 30px; border-radius: 50%; background: #1a2744; color: #fff;
+  font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+}
+.env-signer-preview-info { flex: 1; }
+.env-signer-preview-name { font-size: 13px; font-weight: 600; color: #1e293b; display: block; }
+.env-signer-preview-email { font-size: 11px; color: #94a3b8; display: block; }
+.env-signer-preview-role {
+  font-size: 11px; font-weight: 600; background: #dbeafe; color: #1d4ed8;
+  padding: 3px 10px; border-radius: 20px;
+}
+
+/* Message */
+.env-message {
+  width: 100%; padding: 12px 14px; border: 1.5px solid #d1d5db; border-radius: 8px;
+  font-size: 14px; resize: vertical; box-sizing: border-box; font-family: inherit;
+}
+.env-message:focus { outline: none; border-color: #2563eb; }
+
+/* Signing flow preview */
+.env-flow-preview { display: flex; flex-direction: column; gap: 0; }
+.env-flow-step {
+  display: flex; align-items: flex-start; gap: 12px; padding: 10px 0;
+  position: relative;
+}
+.env-flow-step:not(:last-child)::after {
+  content: ''; position: absolute; left: 11px; top: 32px; bottom: -10px;
+  width: 2px; background: #e2e8f0;
+}
+.env-flow-dot {
+  width: 24px; height: 24px; border-radius: 50%; background: #e2e8f0; color: #94a3b8;
+  font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; z-index: 1;
+}
+.env-flow-dot--done { background: #dcfce7; color: #15803d; }
+.env-flow-dot--final { background: #1a2744; color: #fff; font-size: 11px; }
+.env-flow-label { font-size: 13px; color: #374151; padding-top: 3px; }
+.env-flow-role { color: #94a3b8; }
+
+/* Footer */
+.env-footer {
+  display: flex; gap: 12px; justify-content: flex-end; padding: 20px 0;
+}
+.env-btn {
+  padding: 12px 28px; border-radius: 10px; font-size: 15px; font-weight: 600;
+  cursor: pointer; border: none; transition: all .15s;
+}
+.env-btn--cancel { background: #f1f5f9; color: #374151; border: 1.5px solid #d1d5db; }
+.env-btn--cancel:hover { background: #e2e8f0; }
+.env-btn--send {
+  background: linear-gradient(135deg, #1a2744 0%, #2563eb 100%);
+  color: #fff; padding: 12px 36px;
+  box-shadow: 0 4px 12px rgba(37,99,235,.3);
+}
+.env-btn--send:hover:not(:disabled) { opacity: .9; transform: translateY(-1px); }
+.env-btn--send:disabled { opacity: .6; cursor: not-allowed; transform: none; }
