@@ -318,10 +318,14 @@
   background: #f8fafc;
 }
 
-.sv-iframe-wrap {
+.sv-iframe-wrap,
+.sv-pdf-preview {
   flex: 1;
   position: relative;
-  overflow: hidden;
+  overflow: scroll;
+  scrollbar-gutter: stable both-edges;
+  padding: 20px 40px 40px;
+  background: #737b86;
 }
 
 .sv-iframe {
@@ -329,6 +333,85 @@
   height: 100%;
   border: none;
   display: block;
+}
+.sv-pdf-document {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: max-content;
+  min-width: 100%;
+}
+.sv-pdf-page {
+  margin: 0 auto 14px;
+  box-shadow:
+    0 1px 3px rgba(0,0,0,.35),
+    0 4px 16px rgba(0,0,0,.25);
+}
+.sv-field-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+.sv-doc-field {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #64748b;
+  background: rgba(255,255,255,.84);
+  color: #1e293b;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  overflow: hidden;
+  pointer-events: auto;
+}
+.sv-doc-field--editable {
+  border-color: #2563eb;
+  background: rgba(239,246,255,.94);
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(37,99,235,.2);
+}
+.sv-doc-field--filled {
+  border-color: #16a34a;
+  background: rgba(240,253,244,.94);
+  color: #166534;
+}
+.sv-doc-field span {
+  color: #dc2626;
+  margin-left: 3px;
+}
+.sv-doc-field input[type="text"],
+.sv-doc-field input[type="date"],
+.sv-doc-field input[type="number"] {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+  color: #111827;
+  font: inherit;
+  font-size: 12px;
+  padding: 0 4px;
+  outline: none;
+  min-width: 0;
+}
+.sv-doc-field--checkbox,
+.sv-doc-field--radio {
+  padding: 0;
+}
+.sv-doc-field--checkbox input,
+.sv-doc-field--radio input {
+  width: min(70%, 22px);
+  height: min(70%, 22px);
+  accent-color: #2563eb;
+  cursor: pointer;
+}
+.sv-doc-field:disabled {
+  cursor: default;
 }
 
 /* Sign Here overlay on PDF */
@@ -408,13 +491,15 @@
 }
 .sv-text-preview {
   flex: 1;
-  overflow: auto;
+  overflow: scroll;
+  scrollbar-gutter: stable both-edges;
   padding: 20px 40px 40px;
   background: #808080;
 }
 .sv-docx-preview {
   flex: 1;
-  overflow: auto;
+  overflow: scroll;
+  scrollbar-gutter: stable both-edges;
   background: #808080;
   color: #111827;
   font-family: "Aptos", "Calibri", "Carlito", "Candara", Arial, sans-serif;
@@ -424,6 +509,38 @@
   width: max-content;
   min-width: 100%;
   box-sizing: border-box;
+}
+.sv-docx-pages--measure {
+  position: absolute;
+  left: -100000px;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.sv-docx-rendered-pages {
+  padding: 20px 40px 40px;
+  width: max-content;
+  min-width: 100%;
+  box-sizing: border-box;
+  transform-origin: top left;
+}
+.sv-docx-page-shell {
+  position: relative;
+  width: var(--docx-page-width, 794px);
+  height: var(--docx-page-height, var(--docx-page-min-height, 1123px));
+  min-height: var(--docx-page-min-height, 1123px);
+  margin: 0 auto 12px;
+  background: #fff;
+  box-shadow:
+    0 1px 3px rgba(0,0,0,.35),
+    0 4px 16px rgba(0,0,0,.25);
+  overflow: hidden;
+}
+.sv-docx-page-shell > .docx-page {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  box-shadow: none;
 }
 .sv-docx-preview .docx-page {
   width: var(--docx-page-width, 794px);
@@ -438,6 +555,12 @@
   box-sizing: border-box;
   overflow: hidden;
   position: relative;
+}
+.sv-docx-preview .sv-docx-page-shell > .docx-page {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  box-shadow: none;
 }
 .sv-docx-preview .docx-page--overflowing {
   height: auto;
@@ -751,7 +874,12 @@
   transition: transform .15s, box-shadow .15s;
   animation: pulse-btn 2s infinite;
 }
-.sv-sign-btn:hover { transform: scale(1.02); box-shadow: 0 4px 16px rgba(0,0,0,.2); animation: none; }
+.sv-sign-btn:hover:not(:disabled) { transform: scale(1.02); box-shadow: 0 4px 16px rgba(0,0,0,.2); animation: none; }
+.sv-sign-btn:disabled {
+  cursor: not-allowed;
+  opacity: .62;
+  animation: none;
+}
 @keyframes pulse-btn {
   0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,.4); }
   50%       { box-shadow: 0 0 0 6px rgba(255,255,255,0); }
@@ -988,7 +1116,11 @@
   font-size: 15px;
   padding: 12px 28px;
 }
-.sv-btn--sign:hover { background: #2563eb; }
+.sv-btn--sign:hover:not(:disabled) { background: #2563eb; }
+.sv-btn--sign:disabled {
+  opacity: .58;
+  cursor: not-allowed;
+}
 .sv-btn--lg { font-size: 16px; padding: 14px 32px; }
 .sv-btn:focus-visible,
 .sv-back:focus-visible,

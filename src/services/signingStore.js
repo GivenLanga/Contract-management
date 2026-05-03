@@ -1,4 +1,5 @@
 import { LEGAL_FOLDER_UPDATED, getLegalFolderImport } from './legalFolderStore.js';
+import { normalizeFieldForStorage, defaultFieldValue, SIGNATURE_FIELD_TYPES } from './signingFields.js';
 
 export const SIGNING_UPDATED = 'signing-updated';
 
@@ -65,11 +66,12 @@ export const signerRolesForContract = (contract) =>
 const makeField = (role, index, email = '') => ({
   id: `field_${index}`,
   type: 'signature',
-  page: 0,
-  x: 96,
-  y: 180 + index * 112,
-  width: 240,
-  height: 82,
+  page: 1,
+  x: 0.12,
+  y: Math.min(0.84, 0.18 + index * 0.1),
+  width: 0.28,
+  height: 0.064,
+  coordinateOrigin: 'normalized',
   assignedTo: email,
   role,
   required: true,
@@ -144,11 +146,12 @@ export const requestSigning = (docId, payload, user) => {
 
   const signers = payload.signers || [];
   const fields = (payload.fields?.length ? payload.fields : defaultSigningFields(doc)).map((field, index) => ({
-    ...field,
+    ...normalizeFieldForStorage(field, payload.pageMetrics),
     id: field.id || `field_${index}`,
     assignedTo: field.assignedTo || signers[index]?.email || '',
     role: field.role || signers[index]?.role || `Signer ${index + 1}`,
     filled: false,
+    fieldValue: undefined,
   }));
 
   const preparedBy = user
@@ -160,6 +163,10 @@ export const requestSigning = (docId, payload, user) => {
     status: 'Pending Signature',
     signers,
     signingFields: fields,
+    signingPreparation: {
+      ...(doc.signingPreparation || {}),
+      pageMetrics: payload.pageMetrics || doc.signingPreparation?.pageMetrics,
+    },
     signingOrder: payload.signingOrder || 'parallel',
     message: payload.message || '',
     preparedBy,
@@ -183,15 +190,19 @@ export const signDocument = (docId, payload, user) => {
   const signerEmail = user?.email || payload.signerEmail || 'local-signer@contractiq.local';
   const signerName = user?.name || payload.signerName || signerEmail;
   const fields = doc.signingFields?.length ? [...doc.signingFields] : [makeField(payload.signerRole || 'Signatory', 0, signerEmail)];
-  const targetIndex = fields.findIndex((field) =>
+  const signerOwnsField = (field) => field.assignedTo === signerEmail || !field.assignedTo;
+  const fieldValues = payload.fieldValues && typeof payload.fieldValues === 'object' ? payload.fieldValues : {};
+  const signatureIndex = fields.findIndex((field) =>
     !field.filled &&
+    signerOwnsField(field) &&
     (
       (payload.fieldId && field.id === payload.fieldId) ||
-      field.assignedTo === signerEmail ||
-      !field.assignedTo
+      SIGNATURE_FIELD_TYPES.has(field.type)
     )
   );
-  const index = targetIndex >= 0 ? targetIndex : fields.findIndex((field) => !field.filled);
+  const index = signatureIndex >= 0
+    ? signatureIndex
+    : fields.findIndex((field) => !field.filled && signerOwnsField(field));
 
   if (index < 0) throw new Error('All required signing fields have already been completed.');
 
@@ -203,7 +214,22 @@ export const signDocument = (docId, payload, user) => {
     filled: true,
     filledBy: signerEmail,
     filledAt: signedAt,
+    fieldValue: SIGNATURE_FIELD_TYPES.has(field.type) ? field.fieldValue : defaultFieldValue(field, { email: signerEmail, name: signerName }),
   };
+
+  fields.forEach((item, itemIndex) => {
+    if (SIGNATURE_FIELD_TYPES.has(item.type)) return;
+    if (!signerOwnsField(item)) return;
+    if (!Object.prototype.hasOwnProperty.call(fieldValues, item.id)) return;
+    fields[itemIndex] = {
+      ...item,
+      assignedTo: item.assignedTo || signerEmail,
+      filled: true,
+      filledBy: signerEmail,
+      filledAt: signedAt,
+      fieldValue: fieldValues[item.id],
+    };
+  });
 
   const signature = {
     _id: `SIG-${shortHash(`${docId}-${signerEmail}-${signedAt}`)}`,
@@ -213,12 +239,21 @@ export const signDocument = (docId, payload, user) => {
     signatureData: payload.signatureData,
     initialsData: payload.initialsData,
     method: payload.method || 'draw',
+    fieldId: field.id,
+    page: payload.page || field.page || 1,
+    position: payload.position || {
+      x: field.x,
+      y: field.y,
+      width: field.width,
+      height: field.height,
+      origin: field.coordinateOrigin || 'normalized',
+    },
     signedAt,
     auditHash: shortHash(`${docId}-${signerEmail}-${payload.signatureData}-${signedAt}`),
   };
 
   const signatures = [...(doc.signatures || []), signature];
-  const allSigned = fields.every((item) => item.filled);
+  const allSigned = fields.every((item) => item.filled || !item.required);
   const performedBy = { name: signerName, email: signerEmail };
 
   saveRecord({

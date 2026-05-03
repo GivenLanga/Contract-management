@@ -9,6 +9,7 @@ import {
   saveLegalFolderImport,
 } from '../../services/legalFolderStore';
 import { clearLegalFolderFiles, replaceLegalFolderFiles } from '../../services/legalFolderFileStore';
+import { syncLegalFolderRagIndex } from '../../services/legalFolderRagSync';
 import './LegalFolder.css';
 
 export default function LegalFolder() {
@@ -41,6 +42,7 @@ export default function LegalFolder() {
     };
     saveLegalFolderImport(snapshotWithCache);
     applySnapshot(snapshotWithCache);
+    syncLegalFolderRagIndex().catch(() => {});
     setSyncError('');
   };
 
@@ -105,9 +107,10 @@ export default function LegalFolder() {
   });
 
   const grouped = filtered.reduce((acc, doc) => {
-    const contract = doc.contract?.title || 'Uncategorized';
-    if (!acc[contract]) acc[contract] = [];
-    acc[contract].push(doc);
+    const fullTitle = doc.contract?.title || 'Uncategorized';
+    const group = fullTitle.split(' - ')[0].trim() || 'Uncategorized';
+    if (!acc[group]) acc[group] = [];
+    acc[group].push(doc);
     return acc;
   }, {});
 
@@ -223,23 +226,27 @@ export default function LegalFolder() {
               <div className="legal-docs-grid">
                 {contractDocs.map((doc) => (
                   <div key={doc._id} className="legal-doc-card">
-                    <div className="legal-doc-icon">
-                      {doc.type === 'pdf' ? '📄' : '📝'}
-                    </div>
-                    <div className="legal-doc-info">
-                      <div className="legal-doc-name">{doc.name}</div>
-                      <div className="legal-doc-meta">
-                        <span>{doc.type?.toUpperCase()}</span>
-                        <span>{sizeLabel(doc.size)}</span>
-                        <span>{new Date(doc.updatedAt).toLocaleDateString()}</span>
+                    <div className="legal-doc-top">
+                      <div className="legal-doc-icon">{doc.type === 'pdf' ? '📄' : '📝'}</div>
+                      <div className="legal-doc-info">
+                        <div className="legal-doc-name">{doc.name}</div>
+                        <div className="legal-doc-meta">
+                          {doc.contract?.title ? <span>{doc.contract.title} · </span> : null}
+                          <span>By {doc.uploadedBy?.name || 'Unknown'}</span>
+                        </div>
                       </div>
-                      <div className="legal-doc-uploader">
-                        By {doc.uploadedBy?.name}
-                        {doc.status === 'Signed' && <span className="signed-badge">Signed</span>}
-                      </div>
+                      {doc.type && <span className="legal-doc-type-badge">{doc.type.toUpperCase()}</span>}
                     </div>
-                    <div className="legal-doc-actions">
-                      <span className="legal-doc-path" title={doc.sourcePath}>Shared</span>
+
+                    <div className="legal-doc-chips">
+                      {doc.company && <span className="legal-doc-chip legal-doc-chip--company">🏢 {doc.company}</span>}
+                      {doc.year && <span className="legal-doc-chip">{doc.year}</span>}
+                      {doc.size > 0 && <span className="legal-doc-chip">{sizeLabel(doc.size)}</span>}
+                      {doc.status === 'Signed' && <span className="legal-doc-chip legal-doc-chip--signed">✅ Signed</span>}
+                    </div>
+
+                    <div className="legal-doc-date">
+                      Updated {new Date(doc.updatedAt).toLocaleDateString()}
                     </div>
                   </div>
                 ))}

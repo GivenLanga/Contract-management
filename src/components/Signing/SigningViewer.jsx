@@ -4,11 +4,25 @@ import { useAuth } from '../../context/AuthContext';
 import { renderDocxPreview } from '../../services/docxPreviewRenderer';
 import { canRenderDocxPreview, getLegalFolderFile } from '../../services/legalFolderFileStore';
 import { getSigningDocument, signDocument, subscribeToSigning } from '../../services/signingStore';
+import { documents, signing as signingApi } from '../../services/api';
+import PdfDocumentPreview from './PdfDocumentPreview';
 import SignatureModal from './SignatureModal';
+import {
+  PAGE_FALLBACK,
+  SIGNATURE_FIELD_TYPES,
+  VALUE_FIELD_TYPES,
+  defaultFieldValue,
+  fieldDisplayValue,
+  fieldPercentStyle,
+  fieldTypeConfig,
+  pageMetric,
+} from '../../services/signingFields';
 import './SigningViewer.css';
 
 const TEXT_PREVIEW_TYPES = new Set(['txt', 'md', 'csv', 'json']);
 const IMAGE_TYPES = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg']);
+const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const DOC_MIME = 'application/msword';
 
 const isPdf = (doc, fileRecord) =>
   doc?.type === 'pdf' ||
@@ -31,8 +45,23 @@ const paragraphsFrom = (text) =>
 
 const ZOOM_MIN = 0.35;
 const ZOOM_MAX = 2.5;
-const DEFAULT_PAGE_METRICS = { width: 794, height: 1123 };
+const DEFAULT_PAGE_METRICS = PAGE_FALLBACK;
 const PREVIEW_LOG_PREFIX = '[SigningPreview]';
+const isMongoId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
+
+const typeFromBlob = (doc, blob) => {
+  const explicitType = String(doc?.type || '').toLowerCase();
+  if (explicitType) return explicitType;
+  const mimeType = blob?.type || '';
+  if (mimeType === 'application/pdf') return 'pdf';
+  if (mimeType === DOCX_MIME) return 'docx';
+  if (mimeType === DOC_MIME) return 'doc';
+  const name = String(doc?.filename || doc?.name || '').toLowerCase();
+  if (name.endsWith('.pdf')) return 'pdf';
+  if (name.endsWith('.docx')) return 'docx';
+  if (name.endsWith('.doc')) return 'doc';
+  return 'other';
+};
 
 const previewLog = (level, message, details = undefined) => {
   const logger = console[level] || console.log;
@@ -54,29 +83,6 @@ const formatFileSize = (bytes) => {
     unitIndex += 1;
   }
   return `${value >= 10 || unitIndex === 0 ? Math.round(value) : value.toFixed(1)} ${units[unitIndex]}`;
-};
-
-const countPdfPages = async (blob) => {
-  try {
-    const text = new TextDecoder().decode(await blob.arrayBuffer());
-    const matches = text.match(/\/Type\s*\/Page\b/g);
-    return Math.max(1, matches?.length || 1);
-  } catch {
-    return 1;
-  }
-};
-
-const pdfSourceWithParams = (url, fitMode, zoom) => {
-  if (!url) return '';
-  const params = new URLSearchParams({
-    toolbar: '0',
-    navpanes: '0',
-    scrollbar: '1',
-  });
-  if (fitMode === 'fit-page') params.set('view', 'Fit');
-  else if (fitMode === 'fit-width') params.set('view', 'FitH');
-  else params.set('zoom', String(Math.round(zoom * 100)));
-  return `${url}#${params.toString()}`;
 };
 
 const isPageBreakNode = (node) =>
@@ -449,6 +455,7 @@ export default function SigningViewer() {
   const [success, setSuccess] = useState(false);
   const [fileRecord, setFileRecord] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
+  const [pdfBlob, setPdfBlob] = useState(null);
   const [previewText, setPreviewText] = useState('');
   const [formattedPreview, setFormattedPreview] = useState(null);
   const [fileLoading, setFileLoading] = useState(true);
@@ -456,12 +463,21 @@ export default function SigningViewer() {
   const [zoom, setZoom] = useState(1);
   const [fitMode, setFitMode] = useState('fit-width');
   const [activePage, setActivePage] = useState(1);
+  const [docxPages, setDocxPages] = useState([]);
   const [docxPageCount, setDocxPageCount] = useState(1);
   const [pdfPageCount, setPdfPageCount] = useState(1);
+  const [pdfPageMetrics, setPdfPageMetrics] = useState({ 1: PAGE_FALLBACK });
+  const [fieldValues, setFieldValues] = useState({});
+  const [remoteDoc, setRemoteDoc] = useState(null);
   const docxPagesRef = useRef(null);
   const previewShellRef = useRef(null);
   const previewScrollRef = useRef(null);
   const paginationRunRef = useRef(0);
+  const localDoc = useMemo(() => {
+    void revision;
+    return getSigningDocument(docId);
+  }, [docId, revision]);
+  const doc = localDoc || remoteDoc;
 
   useEffect(() => subscribeToSigning(() => setRevision((value) => value + 1)), []);
 
@@ -475,15 +491,39 @@ export default function SigningViewer() {
       setFileError('');
       setFileRecord(null);
       setPreviewUrl('');
+      setPdfBlob(null);
       setPreviewText('');
       setFormattedPreview(null);
+      setDocxPages([]);
       setDocxPageCount(1);
       setPdfPageCount(1);
+      setPdfPageMetrics({ 1: PAGE_FALLBACK });
       setActivePage(1);
       setFitMode('fit-width');
 
       try {
-        const record = await getLegalFolderFile(docId);
+        let knownDoc = localDoc;
+        if (!knownDoc && isMongoId(docId)) {
+          const data = await documents.get(docId);
+          knownDoc = data.document;
+          if (!cancelled) setRemoteDoc(data.document);
+        }
+
+        let record = await getLegalFolderFile(docId);
+        if (!record?.blob && isMongoId(docId)) {
+          const res = await fetch(documents.viewUrl(docId));
+          if (res.ok) {
+            const blob = await res.blob();
+            record = {
+              docId,
+              name: knownDoc?.name || 'Document',
+              type: typeFromBlob(knownDoc, blob),
+              mimeType: blob.type,
+              size: blob.size,
+              blob,
+            };
+          }
+        }
         if (!record?.blob) {
           previewLog('warn', 'No cached preview file found', { docId });
           if (!cancelled) {
@@ -517,12 +557,10 @@ export default function SigningViewer() {
             diagnostics: docxPreview.diagnostics,
           });
         } else if (isPdf({ type: record.type }, record)) {
-          pdfPages = await countPdfPages(record.blob);
           previewLog('info', 'PDF preview source loaded', {
             docId,
             name: record.name,
             size: record.size,
-            detectedPages: pdfPages,
           });
         } else if (!text && TEXT_PREVIEW_TYPES.has(record.type)) {
           text = await record.blob.text();
@@ -536,6 +574,7 @@ export default function SigningViewer() {
             renderType,
           });
           setPreviewUrl(objectUrl);
+          setPdfBlob(isPdf({ type: record.type }, record) ? record.blob : null);
           setPreviewText(text);
           setFormattedPreview(docxPreview);
           setPdfPageCount(pdfPages);
@@ -563,7 +602,7 @@ export default function SigningViewer() {
       previewLog('info', 'Preview load cleanup', { docId, hadObjectUrl: Boolean(objectUrl) });
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [docId, revision]);
+  }, [docId, revision, localDoc]);
 
   useLayoutEffect(() => {
     if (!formattedPreview?.html || !docxPagesRef.current) return undefined;
@@ -584,6 +623,8 @@ export default function SigningViewer() {
         };
         const result = paginateDocxPages(root, formattedPreview.html);
         decorateDocxPages(root, formattedPreview.chrome);
+        const renderedPages = Array.from(root.querySelectorAll(':scope > .docx-page'));
+        setDocxPages(renderedPages.map((page) => page.innerHTML));
         const after = {
           childCount: root.children.length,
           htmlLength: root.innerHTML.length,
@@ -625,11 +666,30 @@ export default function SigningViewer() {
     };
   }, [docId, formattedPreview?.html, formattedPreview?.chrome, zoom]);
 
-  const doc = getSigningDocument(docId);
+  useEffect(() => {
+    if (localDoc || !isMongoId(docId)) return undefined;
+    let cancelled = false;
+    documents.get(docId)
+      .then((data) => { if (!cancelled) setRemoteDoc(data.document); })
+      .catch(() => { if (!cancelled) setRemoteDoc(null); });
+    return () => { cancelled = true; };
+  }, [docId, revision, localDoc]);
+
   const signatures = doc?.signatures || [];
   const auditLogs = doc?.auditLogs || [];
-  const myPendingField = doc?.signingFields?.find(
+  const signerIdentity = useMemo(
+    () => ({ name: user?.name || user?.email || '', email: user?.email || '' }),
+    [user?.email, user?.name],
+  );
+  const signerFields = useMemo(
+    () => (doc?.signingFields || []).filter((field) => field.assignedTo === user?.email || !field.assignedTo),
+    [doc?.signingFields, user?.email],
+  );
+  const myPendingField = signerFields.find(
     (field) => (field.assignedTo === user?.email || !field.assignedTo) && !field.filled
+  );
+  const myPendingSignatureField = signerFields.find(
+    (field) => SIGNATURE_FIELD_TYPES.has(field.type) && !field.filled
   );
   const hasSigned = user?.email
     ? signatures.some((signature) => signature.signerEmail === user.email)
@@ -679,7 +739,7 @@ export default function SigningViewer() {
       ? Math.max(docxPageCount, sourcePageCount)
       : 1;
   const pageStatus = previewKind === 'pdf'
-    ? `${pageCount} page${pageCount === 1 ? '' : 's'}`
+    ? `Page ${Math.min(activePage, pageCount)} of ${pageCount}`
     : `Page ${Math.min(activePage, pageCount)} of ${pageCount}`;
   const fileSizeLabel = formatFileSize(fileRecord?.size || doc?.size);
   const previewTypeLabel = previewKind === 'docx'
@@ -689,17 +749,134 @@ export default function SigningViewer() {
       : previewKind === 'text'
         ? 'Text preview'
         : previewKind === 'image'
-          ? 'Image preview'
-          : doc?.type ? `${doc.type.toUpperCase()} file` : 'File preview';
+      ? 'Image preview'
+      : doc?.type ? `${doc.type.toUpperCase()} file` : 'File preview';
+
+  const handlePdfLoad = useCallback(({ pageCount: loadedPageCount, pageMetrics }) => {
+    setPdfPageCount(Math.max(1, loadedPageCount || 1));
+    setPdfPageMetrics(Object.keys(pageMetrics || {}).length ? pageMetrics : { 1: PAGE_FALLBACK });
+  }, []);
+
+  const updateFieldValue = (fieldId, value) => {
+    setFieldValues((current) => ({ ...current, [fieldId]: value }));
+  };
+
+  const fieldIsMine = (field) => field.assignedTo === user?.email || !field.assignedTo;
+
+  const requiredValueFieldsComplete = signerFields
+    .filter((field) => VALUE_FIELD_TYPES.has(field.type) && field.required && !field.filled)
+    .every((field) => {
+      const value = fieldValues[field.id];
+      if (field.type === 'checkbox' || field.type === 'radio') return value === true || value === 'true';
+      return String(value ?? '').trim().length > 0;
+    });
+
+  const openField = (field) => {
+    if (!fieldIsMine(field) || field.filled || !canSign) return;
+    if (SIGNATURE_FIELD_TYPES.has(field.type)) {
+      openSignatureModal(field);
+    }
+  };
+
+  const renderSigningField = (field, metric) => {
+    const cfg = fieldTypeConfig(field.type);
+    const isMine = fieldIsMine(field);
+    const editable = canSign && isMine && !field.filled;
+    const value = fieldValues[field.id] ?? defaultFieldValue(field, signerIdentity);
+    const className = [
+      'sv-doc-field',
+      `sv-doc-field--${field.type}`,
+      field.filled ? 'sv-doc-field--filled' : '',
+      editable ? 'sv-doc-field--editable' : '',
+      isMine ? 'sv-doc-field--mine' : '',
+    ].filter(Boolean).join(' ');
+
+    if (VALUE_FIELD_TYPES.has(field.type) && editable) {
+      const common = {
+        className,
+        style: fieldPercentStyle(field, metric),
+        'aria-label': `${cfg.label}${field.required ? ' required' : ''}`,
+      };
+      if (field.type === 'checkbox' || field.type === 'radio') {
+        return (
+          <label key={field.id} {...common}>
+            <input
+              type="checkbox"
+              checked={value === true || value === 'true'}
+              onChange={(event) => updateFieldValue(field.id, event.target.checked)}
+            />
+          </label>
+        );
+      }
+      return (
+        <label key={field.id} {...common}>
+          <input
+            type={field.type === 'date' ? 'date' : field.type === 'number' ? 'number' : 'text'}
+            value={value ?? ''}
+            required={field.required}
+            placeholder={cfg.label}
+            onChange={(event) => updateFieldValue(field.id, event.target.value)}
+          />
+        </label>
+      );
+    }
+
+    return (
+      <button
+        key={field.id}
+        type="button"
+        className={className}
+        style={fieldPercentStyle(field, metric)}
+        onClick={() => openField(field)}
+        disabled={!editable || !SIGNATURE_FIELD_TYPES.has(field.type)}
+        title={field.filled ? `${cfg.label} complete` : cfg.label}
+      >
+        {field.filled ? (fieldDisplayValue(field) || 'Done') : cfg.label}
+        {field.required && !field.filled && <span>*</span>}
+      </button>
+    );
+  };
+
+  const renderPdfFieldOverlay = ({ pageNumber, width, height }) => {
+    const metric = { width, height };
+    return (
+      <div className="sv-field-layer">
+        {(doc?.signingFields || [])
+          .filter((field) => Number(field.page || 1) === pageNumber)
+          .map((field) => renderSigningField(field, metric))}
+      </div>
+    );
+  };
+
+  useEffect(() => {
+    if (!doc?.signingFields?.length) {
+      setFieldValues((current) => (Object.keys(current).length ? {} : current));
+      return;
+    }
+    setFieldValues((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const field of doc.signingFields) {
+        if (!VALUE_FIELD_TYPES.has(field.type)) continue;
+        if (!Object.prototype.hasOwnProperty.call(next, field.id)) {
+          next[field.id] = defaultFieldValue(field, signerIdentity);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [doc?.signingFields, signerIdentity]);
 
   const setZoomToFit = useCallback((mode) => {
     setFitMode(mode);
-    if (!['docx', 'text'].includes(previewKind)) return;
+    if (!['pdf', 'docx', 'text'].includes(previewKind)) return;
 
     const shellRect = previewShellRef.current?.getBoundingClientRect();
     if (!shellRect?.width || !shellRect?.height) return;
 
-    const metrics = formattedPreview?.metrics || DEFAULT_PAGE_METRICS;
+    const metrics = previewKind === 'pdf'
+      ? pageMetric(pdfPageMetrics, activePage)
+      : formattedPreview?.metrics || DEFAULT_PAGE_METRICS;
     const pageWidth = metrics.width || DEFAULT_PAGE_METRICS.width;
     const pageHeight = metrics.height || metrics.minHeight || DEFAULT_PAGE_METRICS.height;
     const availableWidth = Math.max(240, shellRect.width - 96);
@@ -709,7 +886,7 @@ export default function SigningViewer() {
       : availableWidth / pageWidth;
 
     setZoom(clampZoom(nextZoom));
-  }, [formattedPreview?.metrics, previewKind]);
+  }, [activePage, formattedPreview?.metrics, pdfPageMetrics, previewKind]);
 
   const adjustZoom = (delta) => {
     setFitMode('custom');
@@ -717,13 +894,13 @@ export default function SigningViewer() {
   };
 
   useEffect(() => {
-    if (!['docx', 'text'].includes(previewKind) || !previewShellRef.current) return undefined;
+    if (!['pdf', 'docx', 'text'].includes(previewKind) || !previewShellRef.current) return undefined;
     const frame = requestAnimationFrame(() => setZoomToFit('fit-width'));
     return () => cancelAnimationFrame(frame);
   }, [docId, previewKind, formattedPreview?.html, previewText, setZoomToFit]);
 
   useEffect(() => {
-    if (fitMode === 'custom' || !['docx', 'text'].includes(previewKind)) return undefined;
+    if (fitMode === 'custom' || !['pdf', 'docx', 'text'].includes(previewKind)) return undefined;
     const shell = previewShellRef.current;
     if (!shell) return undefined;
     const observer = new ResizeObserver(() => setZoomToFit(fitMode));
@@ -733,13 +910,13 @@ export default function SigningViewer() {
 
   useEffect(() => {
     const scroller = previewScrollRef.current;
-    if (!scroller || !['docx', 'text'].includes(previewKind)) return undefined;
+    if (!scroller || !['pdf', 'docx', 'text'].includes(previewKind)) return undefined;
 
     let frame = 0;
     const updateVisiblePage = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
-        const pages = Array.from(scroller.querySelectorAll('.docx-page, .sv-document-page'));
+        const pages = Array.from(scroller.querySelectorAll('.pdf-preview-page, .sv-docx-page-shell, .sv-document-page'));
         if (!pages.length) {
           setActivePage(1);
           return;
@@ -776,7 +953,7 @@ export default function SigningViewer() {
       scroller.removeEventListener('scroll', updateVisiblePage);
       window.removeEventListener('resize', updateVisiblePage);
     };
-  }, [previewKind, docxPageCount, formattedPreview?.html, zoom, previewText]);
+  }, [previewKind, docxPageCount, pdfPageCount, formattedPreview?.html, zoom, previewText]);
 
   const wordCount = useMemo(() => {
     if (formattedPreview?.html) {
@@ -787,12 +964,28 @@ export default function SigningViewer() {
   }, [formattedPreview, previewText]);
 
   const openSignatureModal = (field = myPendingField) => {
+    if (!requiredValueFieldsComplete) {
+      setSuccess(false);
+      return;
+    }
     setSigningField(field || null);
     setShowModal(true);
   };
 
   const handleSignComplete = async (payload) => {
-    signDocument(docId, payload, user);
+    const valuesForSubmission = {};
+    signerFields.forEach((field) => {
+      if (VALUE_FIELD_TYPES.has(field.type) && !field.filled) {
+        valuesForSubmission[field.id] = fieldValues[field.id] ?? defaultFieldValue(field, signerIdentity);
+      }
+    });
+    if (isMongoId(docId) && remoteDoc) {
+      await signingApi.sign(docId, { ...payload, fieldValues: valuesForSubmission });
+      const refreshed = await documents.get(docId);
+      setRemoteDoc(refreshed.document);
+    } else {
+      signDocument(docId, { ...payload, fieldValues: valuesForSubmission }, user);
+    }
     setShowModal(false);
     setSuccess(true);
     setRevision((value) => value + 1);
@@ -945,11 +1138,14 @@ export default function SigningViewer() {
                 </div>
               </div>
             ) : previewKind === 'pdf' ? (
-              <div className="sv-iframe-wrap">
-                <iframe
-                  src={pdfSourceWithParams(previewUrl, fitMode, zoom)}
-                  className="sv-iframe"
-                  title={doc.name}
+              <div className="sv-pdf-preview" ref={previewScrollRef}>
+                <PdfDocumentPreview
+                  blob={pdfBlob}
+                  zoom={zoom}
+                  className="sv-pdf-document"
+                  pageClassName="sv-pdf-page"
+                  onDocumentLoad={handlePdfLoad}
+                  renderOverlay={renderPdfFieldOverlay}
                 />
               </div>
             ) : previewKind === 'image' ? (
@@ -960,10 +1156,9 @@ export default function SigningViewer() {
               <div className="sv-docx-preview" ref={previewScrollRef}>
                 <div
                   ref={docxPagesRef}
-                  className="sv-docx-pages"
+                  className="sv-docx-pages sv-docx-pages--measure"
                   data-docx-source-pages={sourcePageCount}
                   style={{
-                    zoom,
                     '--docx-page-width': `${formattedPreview.metrics.width}px`,
                     '--docx-page-height': `${formattedPreview.metrics.height || formattedPreview.metrics.minHeight}px`,
                     '--docx-page-min-height': `${formattedPreview.metrics.minHeight}px`,
@@ -974,6 +1169,39 @@ export default function SigningViewer() {
                     fontFamily: formattedPreview.metrics.fontFamily,
                   }}
                 />
+                <div className="sv-docx-rendered-pages" style={{ zoom }}>
+                  {(docxPages.length ? docxPages : [formattedPreview.html]).map((pageHtml, index) => {
+                    const pageNumber = index + 1;
+                    const metric = formattedPreview.metrics || PAGE_FALLBACK;
+                    return (
+                      <div
+                        key={pageNumber}
+                        className="sv-docx-page-shell"
+                        data-sv-page-number={pageNumber}
+                        style={{
+                          '--docx-page-width': `${metric.width}px`,
+                          '--docx-page-height': `${metric.height || metric.minHeight}px`,
+                          '--docx-page-min-height': `${metric.minHeight}px`,
+                          '--docx-margin-top': `${metric.marginTop}px`,
+                          '--docx-margin-right': `${metric.marginRight}px`,
+                          '--docx-margin-bottom': `${metric.marginBottom}px`,
+                          '--docx-margin-left': `${metric.marginLeft}px`,
+                          fontFamily: metric.fontFamily,
+                        }}
+                      >
+                        <article
+                          className="docx-page"
+                          dangerouslySetInnerHTML={{ __html: pageHtml }}
+                        />
+                        {renderPdfFieldOverlay({
+                          pageNumber,
+                          width: metric.width,
+                          height: metric.height || metric.minHeight || PAGE_FALLBACK.height,
+                        })}
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             ) : previewKind === 'text' ? (
               <div className="sv-text-preview" ref={previewScrollRef}>
@@ -1013,7 +1241,8 @@ export default function SigningViewer() {
               <div className="sv-floating-sign">
                 <button
                   className="sv-btn sv-btn--sign"
-                  onClick={() => openSignatureModal(myPendingField)}
+                  disabled={!requiredValueFieldsComplete}
+                  onClick={() => openSignatureModal(myPendingSignatureField || myPendingField)}
                 >
                   Sign This Document
                 </button>
@@ -1054,11 +1283,17 @@ export default function SigningViewer() {
                   <div className="sv-my-action-label">Your action required</div>
                   <button
                     className="sv-sign-btn"
-                    onClick={() => openSignatureModal(myPendingField)}
+                    disabled={!requiredValueFieldsComplete}
+                    onClick={() => openSignatureModal(myPendingSignatureField || myPendingField)}
                   >
-                    <span>✍️</span>
+                    <span>Sign</span>
                     Sign This Document
                   </button>
+                  {!requiredValueFieldsComplete && (
+                    <p className="sv-sign-legal">
+                      Complete required fields on the document before signing.
+                    </p>
+                  )}
                   <p className="sv-sign-legal">
                     By signing you agree this is your legally binding signature.
                   </p>

@@ -19,20 +19,21 @@
         "required": ["id", "type", "page", "x", "y", "width", "height", "source", "confidence"],
         "properties": {
           "id": { "type": "string" },
-          "type": { "type": "string", "enum": ["signature", "initials", "date", "text"] },
+          "type": { "type": "string", "enum": ["signature", "initials", "date", "text", "number", "checkbox", "radio", "dropdown"] },
           "page": { "type": "integer", "minimum": 1 },
           "x": { "type": "number", "minimum": 0 },
           "y": { "type": "number", "minimum": 0 },
           "width": { "type": "number", "exclusiveMinimum": 0 },
           "height": { "type": "number", "exclusiveMinimum": 0 },
-          "coordinateOrigin": { "type": "string", "enum": ["pdf", "top-left"], "default": "pdf" },
+          "coordinateOrigin": { "type": "string", "enum": ["pdf", "top-left", "normalized"], "default": "normalized" },
+          "fieldValue": {},
           "assignedTo": { "type": "string" },
           "role": { "type": "string" },
           "required": { "type": "boolean" },
           "filled": { "type": "boolean" },
           "source": {
             "type": "string",
-            "enum": ["anchor", "layoutlmv3", "textract", "opencv-ocr", "heuristic-keyword", "heuristic-default", "manual"]
+            "enum": ["anchor", "yolo-cv", "layoutlmv3", "textract", "opencv-ocr", "heuristic-keyword", "heuristic-default", "manual"]
           },
           "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
           "anchor": { "type": "string" },

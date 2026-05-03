@@ -1,0 +1,6 @@
+ultralytics>=8.0.0
+pdf2image>=1.17.0
+opencv-python-headless>=4.9.0
+pytesseract>=0.3.10
+pypdf>=4.0.0
+pillow>=10.0.0

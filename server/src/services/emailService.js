@@ -91,27 +91,68 @@ const sendDocumentUpload = async (recipients, document, uploader) => {
   return Promise.allSettled(jobs);
 };
 
-const sendSigningRequest = async (signer, document, requestedBy) => {
+const sendSigningRequest = async (signer, document, requestedBy, signerToken) => {
+  const appUrl = process.env.APP_URL || 'http://localhost:5173';
+  const signingLink = signerToken
+    ? `${appUrl}/sign/external/${signerToken}`
+    : `${appUrl}/signing`;
   const html = baseTemplate(`
     <p>Hi <strong>${signer.name || signer.email}</strong>,</p>
     <p>Your signature is required on the following document.</p>
     <div class="meta">
       <p><strong>Document:</strong> ${document.name}</p>
-      <p><strong>Requested by:</strong> ${requestedBy.name}</p>
+      <p><strong>Requested by:</strong> ${requestedBy.name || requestedBy.email}</p>
       <p><strong>Your role:</strong> ${signer.role || 'Signatory'}</p>
     </div>
-    <p>Please log in to ContractIQ to review and sign the document.</p>
+    <p>Click the button below to review and sign the document. No account required.</p>
+    <a href="${signingLink}" class="btn">Review &amp; Sign Document</a>
+    <p style="font-size:12px;color:#888;margin-top:16px;">If the button doesn't work, copy this link: ${signingLink}</p>
   `, 'Signature Required');
   return send(signer.email, `Signature Required: ${document.name}`, html);
+};
+
+const sendSigningReminder = async (signer, document, requestedBy, signerToken) => {
+  const appUrl = process.env.APP_URL || 'http://localhost:5173';
+  const signingLink = signerToken
+    ? `${appUrl}/sign/external/${signerToken}`
+    : `${appUrl}/signing`;
+  const html = baseTemplate(`
+    <p>Hi <strong>${signer.name || signer.email}</strong>,</p>
+    <p>This is a friendly reminder that your signature is still required on the document below.</p>
+    <div class="meta">
+      <p><strong>Document:</strong> ${document.name}</p>
+      <p><strong>Requested by:</strong> ${requestedBy.name || requestedBy.email}</p>
+      <p><strong>Your role:</strong> ${signer.role || 'Signatory'}</p>
+    </div>
+    <a href="${signingLink}" class="btn">Sign Now</a>
+    <p style="font-size:12px;color:#888;margin-top:16px;">If the button doesn't work, copy this link: ${signingLink}</p>
+  `, 'Reminder: Signature Required');
+  return send(signer.email, `Reminder — Signature Required: ${document.name}`, html);
+};
+
+const sendSigningCompletion = async (owner, document, signers = []) => {
+  const signerRows = signers
+    .map((s) => `<tr><td style="padding:4px 8px;font-size:13px;">${s.name || s.email}</td><td style="padding:4px 8px;font-size:13px;color:#15803d;">${s.signingStatus === 'signed' ? '&#10003; Signed' : s.signingStatus}</td></tr>`)
+    .join('');
+  const html = baseTemplate(`
+    <p>Hi <strong>${owner.name || owner.email}</strong>,</p>
+    <p>All signatures have been collected. <strong>${document.name}</strong> is now fully executed.</p>
+    <table style="width:100%;border-collapse:collapse;margin:16px 0;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden">
+      <thead><tr style="background:#f1f5f9"><th style="padding:6px 8px;text-align:left;font-size:12px;color:#64748b">Signer</th><th style="padding:6px 8px;text-align:left;font-size:12px;color:#64748b">Status</th></tr></thead>
+      <tbody>${signerRows}</tbody>
+    </table>
+    <p>The finalized, tamper-evident PDF has been saved to your ContractIQ document vault.</p>
+  `, 'Document Fully Executed');
+  return send(owner.email, `Fully Executed: ${document.name}`, html);
 };
 
 const sendSigningConfirmation = async (recipient, document, signer, isOwner) => {
   const title = isOwner ? 'Document Signed' : 'Your Signature Was Recorded';
   const html = baseTemplate(`
     <p>Hi <strong>${recipient.name || recipient.email}</strong>,</p>
-    <p><strong>${signer.name}</strong> has signed <strong>${document.name}</strong>.</p>
+    <p><strong>${signer.name || signer.email}</strong> has signed <strong>${document.name}</strong>.</p>
     <div class="meta">
-      <p><strong>Signed by:</strong> ${signer.name} (${signer.email})</p>
+      <p><strong>Signed by:</strong> ${signer.name || signer.email} (${signer.email})</p>
       <p><strong>Signed at:</strong> ${new Date().toLocaleString()}</p>
       <p><strong>Document:</strong> ${document.name}</p>
     </div>
@@ -140,6 +181,8 @@ module.exports = {
   sendTaskCompletion,
   sendDocumentUpload,
   sendSigningRequest,
+  sendSigningReminder,
+  sendSigningCompletion,
   sendSigningConfirmation,
   sendExpiryAlert,
   send,

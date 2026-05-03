@@ -18,7 +18,7 @@ const signatureSchema = new mongoose.Schema({
     y: { type: Number },
     width: { type: Number },
     height: { type: Number },
-    origin: { type: String, enum: ['pdf', 'top-left'] },
+    origin: { type: String, enum: ['pdf', 'top-left', 'normalized'] },
   },
   signedAt: { type: Date, default: Date.now },
   ipAddress: { type: String },

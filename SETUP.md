@@ -85,14 +85,13 @@ Without SMTP config, emails are logged to console (mock mode).
 
 ---
 
-## 6. AI Configuration (Hugging Face)
+## 6. AI Configuration
 
-1. Sign up at [huggingface.co](https://huggingface.co)
-2. Get a free API token: Settings → Access Tokens
-3. Set `HF_API_KEY=hf_your_token`
-4. Default model: `Qwen/Qwen2.5-7B-Instruct` (free tier)
+The assistant is local-first by default: `ACTIVE_MODEL_PROVIDER=local` runs the configured GGUF model through the local runtime and verifies model files with SHA-256 before use.
 
-Without an API key, AI uses keyword-based search with simulated responses.
+Optional Hugging Face cloud inference is disabled unless you explicitly set `ACTIVE_MODEL_PROVIDER=huggingface` and `ALLOW_CLOUD_AI=true`. Only enable this after confirming that contract and Legal Folder content may leave your environment.
+
+Useful safety limits are in `server/.env.example`: `AI_CHAT_RATE_LIMIT_MAX`, `AI_MAX_MESSAGE_CHARS`, `AI_RAG_MAX_SYNC_TOTAL_CHARS`, and `AI_REDACT_RAG_PII`.
 
 ---
 

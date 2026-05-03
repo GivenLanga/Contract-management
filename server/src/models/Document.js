@@ -14,7 +14,7 @@ const documentSchema = new mongoose.Schema({
   uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   status: {
     type: String,
-    enum: ['Draft', 'Under Review', 'Approved', 'Rejected', 'Pending Signature', 'Signed', 'Archived'],
+    enum: ['Draft', 'Under Review', 'Approved', 'Rejected', 'Pending Signature', 'Signed', 'Archived', 'Declined'],
     default: 'Draft',
   },
   version: { type: Number, default: 1 },
@@ -38,17 +38,26 @@ const documentSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     order: { type: Number },
     authMethod: { type: String, default: 'email' },
+    token: { type: String }, // secure token for token-based external signing
+    signingStatus: { type: String, enum: ['not_signed', 'signed', 'rejected', 'declined'], default: 'not_signed' },
+    sentAt: { type: Date },
+    viewedAt: { type: Date },
+    signedAt: { type: Date },
+    rejectionReason: { type: String },
+    lastReminderAt: { type: Date },
   }],
   signingOrder: { type: String, enum: ['parallel', 'sequential'], default: 'parallel' },
   signingFields: [{
     id: { type: String },
-    type: { type: String, enum: ['signature', 'initials', 'date', 'text'] },
+    type: { type: String, enum: ['signature', 'initials', 'date', 'text', 'number', 'checkbox', 'radio', 'dropdown'] },
+    fieldMeta: { type: mongoose.Schema.Types.Mixed }, // per-type options (dropdown choices, checkbox value, etc.)
     page: { type: Number },
     x: { type: Number },
     y: { type: Number },
     width: { type: Number },
     height: { type: Number },
-    coordinateOrigin: { type: String, enum: ['pdf', 'top-left'], default: 'top-left' },
+    coordinateOrigin: { type: String, enum: ['pdf', 'top-left', 'normalized'], default: 'normalized' },
+    fieldValue: { type: mongoose.Schema.Types.Mixed },
     assignedTo: { type: String }, // email
     role: { type: String },
     required: { type: Boolean, default: true },
@@ -57,7 +66,7 @@ const documentSchema = new mongoose.Schema({
     filledAt: { type: Date },
     source: {
       type: String,
-      enum: ['anchor', 'layoutlmv3', 'textract', 'opencv-ocr', 'heuristic-keyword', 'heuristic-default', 'manual'],
+      enum: ['anchor', 'yolo-cv', 'layoutlmv3', 'textract', 'opencv-ocr', 'heuristic-keyword', 'heuristic-default', 'manual'],
       default: 'manual',
     },
     confidence: { type: Number, default: 1 },

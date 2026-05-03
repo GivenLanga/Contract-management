@@ -1,5 +1,5 @@
 /* ── Page ─────────────────────────────── */
-.sd-page { padding: 32px; max-width: 1400px; margin: 0 auto; }
+.sd-page { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 28px; }
 
 /* ── Header ──────────────────────────── */
 .sd-header {
@@ -75,6 +75,7 @@
 .sd-badge--signed    { background: #dcfce7; color: #15803d; }
 .sd-badge--approved  { background: #d1fae5; color: #065f46; }
 .sd-badge--ready     { background: #f1f5f9; color: #475569; }
+.sd-badge--declined  { background: #fee2e2; color: #b91c1c; }
 
 /* ── Progress ────────────────────────── */
 .sd-progress-row { display: flex; align-items: center; gap: 10px; }
@@ -86,12 +87,33 @@
 .sd-progress-label { font-size: 12px; font-weight: 600; color: #64748b; white-space: nowrap; }
 
 /* ── Signer chips ────────────────────── */
-.sd-signers-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.sd-signers-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.sd-signer-item { display: flex; align-items: center; gap: 4px; }
 .sd-signer-chip {
   font-size: 12px; padding: 4px 10px; border-radius: 20px;
   background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0;
 }
-.sd-signer-chip--done { background: #f0fdf4; color: #15803d; border-color: #86efac; }
+.sd-signer-chip--signed   { background: #f0fdf4; color: #15803d; border-color: #86efac; }
+.sd-signer-chip--viewed   { background: #fffbeb; color: #92400e; border-color: #fcd34d; }
+.sd-signer-chip--rejected { background: #fef2f2; color: #b91c1c; border-color: #fca5a5; }
+
+.sd-remind-btn {
+  background: none; border: 1px solid #d1d5db; border-radius: 6px;
+  font-size: 12px; cursor: pointer; padding: 2px 7px; color: #6b7280; transition: all .15s;
+}
+.sd-remind-btn:hover { background: #eff6ff; border-color: #93c5fd; color: #2563eb; }
+.sd-remind-btn--sent { border-color: #86efac; color: #15803d; background: #f0fdf4; cursor: default; }
+.sd-remind-btn:disabled { opacity: .6; cursor: not-allowed; }
+
+/* ── Order badge ────────────────────── */
+.sd-order-badge {
+  display: inline-block; font-size: 10px; font-weight: 600; padding: 1px 7px;
+  background: #f3f4f6; color: #6b7280; border-radius: 20px; border: 1px solid #e5e7eb;
+  margin-left: 6px; vertical-align: middle;
+}
+
+/* ── Stat declined ───────────────────── */
+.sd-stat--declined .sd-stat-value { color: #b91c1c; }
 
 /* ── Card actions ────────────────────── */
 .sd-card-actions { display: flex; gap: 8px; flex-wrap: wrap; }

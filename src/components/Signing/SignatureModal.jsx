@@ -204,8 +204,14 @@ export default function SignatureModal({ document, signingField, onClose, onSign
         method: tab,
         signatureTelemetry: tab === 'draw' ? signatureTelemetryRef.current : undefined,
         fieldId: myField?.id,
-        page: myField?.page || 0,
-        position: myField ? { x: myField.x, y: myField.y, width: myField.width, height: myField.height } : undefined,
+        page: myField?.page || 1,
+        position: myField ? {
+          x: myField.x,
+          y: myField.y,
+          width: myField.width,
+          height: myField.height,
+          origin: myField.coordinateOrigin || 'normalized',
+        } : undefined,
         signerRole: signerRole || myField?.role,
       });
     } catch (err) {

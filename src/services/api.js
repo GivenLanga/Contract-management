@@ -76,6 +76,7 @@ export const documents = {
   lock: (id, password) => request(`/documents/${id}/lock`, { method: 'PUT', body: JSON.stringify({ password }) }),
   unlock: (id, password) => request(`/documents/${id}/unlock`, { method: 'POST', body: JSON.stringify({ password }) }),
   delete: (id) => request(`/documents/${id}`, { method: 'DELETE' }),
+  viewUrl: (id) => `${BASE_URL}/documents/${id}/view?token=${encodeURIComponent(getToken() || '')}`,
   downloadUrl: (id) => `${BASE_URL}/documents/${id}/download?token=${getToken()}`,
   getComments: (id) => request(`/documents/${id}/comments`),
   addComment: (id, data) => request(`/documents/${id}/comments`, { method: 'POST', body: JSON.stringify(data) }),
@@ -93,15 +94,42 @@ export const templates = {
 
 export const signing = {
   pending: () => request('/signing/pending'),
+  prepare: (docId, data) => request(`/signing/${docId}/prepare`, { method: 'POST', body: JSON.stringify(data) }),
   getSignatures: (docId) => request(`/signing/${docId}/signatures`),
   sign: (docId, data) => request(`/signing/${docId}/sign`, { method: 'POST', body: JSON.stringify(data) }),
   requestSigning: (docId, data) => request(`/signing/${docId}/request`, { method: 'POST', body: JSON.stringify(data) }),
   auditTrail: (docId) => request(`/signing/${docId}/audit-trail`),
+  remind: (docId, signerEmail) => request(`/signing/${docId}/remind/${encodeURIComponent(signerEmail)}`, { method: 'POST', body: JSON.stringify({}) }),
+  reject: (docId, reason) => request(`/signing/${docId}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  metadata: (docId) => request(`/signing/${docId}/metadata`),
+  publicSignerInfo: (token) => request(`/signing/public/sign/${token}`),
+  publicSign: (token, data) => request(`/signing/public/sign/${token}`, { method: 'POST', body: JSON.stringify(data) }),
+  rejectViaToken: (token, reason) => request(`/signing/reject-token/${token}`, { method: 'POST', body: JSON.stringify({ reason }) }),
 };
 
 export const ai = {
-  query: (query) => request('/ai/query', { method: 'POST', body: JSON.stringify({ query }) }),
+  chat: (message, sessionId) => request('/ai/chat', { method: 'POST', body: JSON.stringify({ message, sessionId }) }),
+  confirm: (confirmationId) => request('/ai/confirm', { method: 'POST', body: JSON.stringify({ confirmationId }) }),
+  clearSession: (sessionId) => request(`/ai/session?sessionId=${encodeURIComponent(sessionId)}`, { method: 'DELETE' }),
   suggestions: () => request('/ai/suggestions'),
+  health: () => request('/ai/health'),
+  status: () => request('/ai/status'),
+  models: () => request('/ai/models'),
+  downloadModel: (modelId) => request(`/ai/models/${encodeURIComponent(modelId)}/download`, { method: 'POST' }),
+  cancelDownload: (modelId) => request(`/ai/models/${encodeURIComponent(modelId)}/download/cancel`, { method: 'POST' }),
+  verifyModel: (modelId) => request(`/ai/models/${encodeURIComponent(modelId)}/verify`, { method: 'POST' }),
+  start: (modelId) => request('/ai/start', { method: 'POST', body: JSON.stringify({ modelId }) }),
+  stop: () => request('/ai/stop', { method: 'POST' }),
+  disable: () => request('/ai/disable', { method: 'POST' }),
+  enable: () => request('/ai/enable', { method: 'POST' }),
+  syncLegalFolderRag: (data) => request('/ai/rag/legal-folder/sync', { method: 'POST', body: JSON.stringify(data) }),
+  legalFolderRagStatus: () => request('/ai/rag/legal-folder/status'),
+  syncSigningState: (data) => request('/ai/signing-state/sync', { method: 'POST', body: JSON.stringify(data) }),
+  signingStateStatus: () => request('/ai/signing-state/status'),
+  backendRagStatus: () => request('/ai/rag/backend/status'),
+  reindexBackendRag: () => request('/ai/rag/backend/reindex', { method: 'POST' }),
+  // Legacy
+  query: (query) => request('/ai/query', { method: 'POST', body: JSON.stringify({ query }) }),
 };
 
 export const notifications = {

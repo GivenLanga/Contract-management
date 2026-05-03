@@ -5,7 +5,7 @@ export const LEGAL_FOLDER_UPDATED = 'legal-folder-updated';
 const CONTRACTS_KEY = 'clm_legal_folder_contracts';
 const DOCUMENTS_KEY = 'clm_legal_folder_documents';
 const SOURCE_KEY = 'clm_legal_folder_source';
-const IMPORTER_VERSION = 4;
+const IMPORTER_VERSION = 5;
 
 const CONTRACT_TYPES = [
   { value: 'Addendum', label: 'Addendum', terms: ['addendum', 'variation of the main agreement', 'main agreement is hereby varied'] },
@@ -59,6 +59,28 @@ const GENERIC_FOLDERS = new Set([
 const TEXT_EXTRACT_EXTENSIONS = new Set(['docx', 'txt', 'md', 'rtf', 'csv', 'json']);
 const SKIPPED_FILE_PATTERN = /(^\.|^~\$|\.tmp$|\.lock$|\.crdownload$|\.part$)/i;
 const GENERIC_FILE_NAME = /\b(annexure|appendix|attachment|comments|exhibit|redline|redlines|schedule|scope|signed copy|version|v\d+(?:\.\d+)*)\b/i;
+
+// Returns true if the file lives inside a drafts folder anywhere in its path
+const isInDraftsFolder = (pathParts) =>
+  pathParts.slice(0, -1).some((part) => part.toLowerCase() === 'drafts');
+
+// Detects the corporate nesting pattern: RootFolder/Year/Company/StatusFolder/file
+// Returns { year, company } when the pattern is found, otherwise null
+const detectNestedStructure = (pathParts) => {
+  const yearIdx = pathParts.findIndex((part) => /^20\d{2}$/.test(part));
+  if (yearIdx === -1 || yearIdx + 1 >= pathParts.length - 1) return null;
+  const companyPart = pathParts[yearIdx + 1];
+  if (GENERIC_FOLDERS.has(companyPart.toLowerCase()) || /^20\d{2}$/.test(companyPart)) return null;
+  return { year: pathParts[yearIdx], company: companyPart };
+};
+
+// Infers status from the folder name a file sits in (final/signed/executed → Active)
+const inferStatusFromPath = (pathParts) => {
+  const folders = pathParts.slice(0, -1).map((p) => p.toLowerCase());
+  if (folders.some((f) => f === 'signed' || f === 'executed')) return 'Active';
+  if (folders.some((f) => f === 'final' || f === 'approved')) return 'Active';
+  return null;
+};
 
 const toStorage = (key, value) => {
   if (typeof window === 'undefined') return;
@@ -455,10 +477,11 @@ const inferClauses = (text, typeValue) => {
   return unique(clauses.length ? clauses : ['Governing Terms', 'Termination']);
 };
 
-const makeDocument = (entry, contract, status) => {
+const makeDocument = (entry, contract, status, nestedInfo = null) => {
   const ext = extensionOf(entry.name);
   const updatedAt = new Date(entry.lastModified || Date.now()).toISOString();
   const sourcePath = entry.relativePath || entry.name;
+  const companyName = nestedInfo?.company ? titleCase(nestedInfo.company) : null;
 
   return {
     _id: `DOC-${stableHash(`${sourcePath}-${entry.size}-${entry.lastModified}`)}`,
@@ -467,14 +490,16 @@ const makeDocument = (entry, contract, status) => {
     size: entry.size || 0,
     status,
     updatedAt,
-    uploadedBy: { name: 'Shared Folder' },
+    uploadedBy: { name: companyName || 'Shared Folder' },
     contract: { id: contract.id, title: contract.title },
     source: 'shared-folder',
     sourcePath,
+    company: companyName,
+    year: nestedInfo?.year || null,
   };
 };
 
-const makeContractFromEntry = (entry, pathParts, sourceName) => {
+const makeContractFromEntry = (entry, pathParts, sourceName, nestedInfo = null) => {
   const sourcePath = entry.relativePath || entry.name;
   const fileBase = baseNameOf(entry.name);
   const nameSource = contractNameSource(fileBase, pathParts);
@@ -484,11 +509,11 @@ const makeContractFromEntry = (entry, pathParts, sourceName) => {
   const pathText = `${typeSignal} ${textContent.slice(0, 8000)}`;
   const templateLike = isTemplateLike(pathText);
   const type = inferType(typeSignal, { includeGeneric: false }) || inferType(pathText) || CONTRACT_TYPES[CONTRACT_TYPES.length - 1];
-  const status = inferStatus(pathText);
+  const status = inferStatusFromPath(pathParts) || inferStatus(pathText);
   const department = inferDepartment(pathText, pathParts);
-  const counterparty =
-    inferCounterpartyFromText(textContent) ||
-    inferCounterparty(nameSource, type);
+  const counterparty = nestedInfo?.company
+    ? titleCase(nestedInfo.company)
+    : (inferCounterpartyFromText(textContent) || inferCounterparty(nameSource, type));
   const title = `${type.label} - ${counterparty}`;
   const dates = templateLike ? [] : inferDates(pathText);
   const startDate = dates.length > 1 ? dates[0] : null;
@@ -528,6 +553,7 @@ const makeContractFromEntry = (entry, pathParts, sourceName) => {
     source: 'shared-folder',
     sourceFolder,
     sourcePath,
+    year: nestedInfo?.year || null,
     importedAt: new Date().toISOString(),
   };
 };
@@ -574,8 +600,10 @@ export const buildLegalFolderImport = (entries, sourceName = 'Shared Folder') =>
   const importableEntries = entries.filter((entry) => {
     const path = entry.relativePath || entry.name;
     const name = entry.name || path.split('/').pop();
-    const hiddenPath = normalisePath(path).some((part) => part.startsWith('.'));
-    const skipped = !name || hiddenPath || SKIPPED_FILE_PATTERN.test(name);
+    const pathParts = normalisePath(path);
+    const hiddenPath = pathParts.some((part) => part.startsWith('.'));
+    const inDrafts = isInDraftsFolder(pathParts);
+    const skipped = !name || hiddenPath || SKIPPED_FILE_PATTERN.test(name) || inDrafts;
 
     if (skipped) {
       skippedEntries.push({ name, path });
@@ -588,8 +616,9 @@ export const buildLegalFolderImport = (entries, sourceName = 'Shared Folder') =>
   const contracts = importableEntries.map((entry) => {
     const pathParts = normalisePath(entry.relativePath || entry.name);
     const name = entry.name || pathParts[pathParts.length - 1];
-    const contract = makeContractFromEntry({ ...entry, name }, pathParts, sourceName);
-    const document = makeDocument({ ...entry, name }, contract, contract.status);
+    const nestedInfo = detectNestedStructure(pathParts);
+    const contract = makeContractFromEntry({ ...entry, name }, pathParts, sourceName, nestedInfo);
+    const document = makeDocument({ ...entry, name }, contract, contract.status, nestedInfo);
 
     contract.relatedDocuments = [document];
     contract.tags = unique([...(contract.tags || []), extensionOf(name).toUpperCase()]);

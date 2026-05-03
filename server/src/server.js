@@ -15,6 +15,7 @@ const signingRoutes = require('./routes/signing');
 const aiRoutes = require('./routes/ai');
 const notificationRoutes = require('./routes/notifications');
 const reportRoutes = require('./routes/reports');
+const { getInstance: getAiRuntimeManager } = require('./ai/runtime/AiRuntimeManager');
 
 const app = express();
 
@@ -86,6 +87,11 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`CLM Server running on port ${PORT} [${process.env.NODE_ENV}]`);
+  if ((process.env.ACTIVE_MODEL_PROVIDER || 'local') === 'local') {
+    getAiRuntimeManager().initialize().catch((err) => {
+      console.error(`[AI Runtime] Startup check failed: ${err.message}`);
+    });
+  }
 });
 
 // Start expiry notification cron job after server starts
