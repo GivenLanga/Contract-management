@@ -279,6 +279,8 @@ const flattenPdfBytes = async ({ pdfPath, signatures = [], fields = [] }) => {
   const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
   const pages = pdfDoc.getPages();
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const renderedSignatureFieldIds = new Set();
+  const renderedInitialFieldIds = new Set();
 
   for (const field of fields.filter((item) => valueFieldTypes.has(item.type) && item.filled)) {
     const page = pages[Math.max(0, Math.min(pages.length - 1, Number(field.page || 1) - 1))];
@@ -290,9 +292,38 @@ const flattenPdfBytes = async ({ pdfPath, signatures = [], fields = [] }) => {
     const page = pages[Math.max(0, Math.min(pages.length - 1, placement.page - 1))];
     if (placement.field?.type === 'initials') {
       await drawInitials(pdfDoc, page, signature, placement);
+      if (placement.field.id) renderedInitialFieldIds.add(placement.field.id);
     } else if (!placement.field || signatureFieldTypes.has(placement.field.type)) {
       await drawSignature(pdfDoc, page, signature, placement, font);
+      if (placement.field?.id) renderedSignatureFieldIds.add(placement.field.id);
     }
+  }
+
+  const signaturesByEmail = new Map();
+  for (const signature of signatures) {
+    if (signature.signerEmail && !signaturesByEmail.has(signature.signerEmail)) {
+      signaturesByEmail.set(signature.signerEmail, signature);
+    }
+  }
+
+  for (const field of fields.filter((item) => item.type === 'signature' && item.filled)) {
+    if (field.id && renderedSignatureFieldIds.has(field.id)) continue;
+    const signature = signaturesByEmail.get(field.filledBy) || signaturesByEmail.get(field.assignedTo);
+    if (!signature) continue;
+    const placement = resolvePlacement(field, fields);
+    const page = pages[Math.max(0, Math.min(pages.length - 1, placement.page - 1))];
+    await drawSignature(pdfDoc, page, signature, placement, font);
+    if (field.id) renderedSignatureFieldIds.add(field.id);
+  }
+
+  for (const field of fields.filter((item) => item.type === 'initials' && item.filled)) {
+    if (field.id && renderedInitialFieldIds.has(field.id)) continue;
+    const signature = signaturesByEmail.get(field.filledBy) || signaturesByEmail.get(field.assignedTo);
+    if (!signature) continue;
+    const placement = resolvePlacement(field, fields);
+    const page = pages[Math.max(0, Math.min(pages.length - 1, placement.page - 1))];
+    await drawInitials(pdfDoc, page, signature, placement);
+    if (field.id) renderedInitialFieldIds.add(field.id);
   }
 
   try {

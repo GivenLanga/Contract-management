@@ -313,6 +313,24 @@
   background-size: 24px 24px;
   position: relative;
 }
+.env-canvas-wrap::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+.env-canvas-wrap::-webkit-scrollbar-track {
+  background: #c4c9d4;
+}
+.env-canvas-wrap::-webkit-scrollbar-thumb {
+  background: #7c8ba1;
+  border-radius: 5px;
+  border: 2px solid #c4c9d4;
+}
+.env-canvas-wrap::-webkit-scrollbar-thumb:hover {
+  background: #5a6a82;
+}
+.env-canvas-wrap::-webkit-scrollbar-corner {
+  background: #c4c9d4;
+}
 .env-canvas-inner {
   padding: 32px;
   display: flex;
@@ -740,6 +758,30 @@
   cursor: nwse-resize;
   touch-action: none;
 }
+.env-fbox-assignee {
+  position: absolute;
+  left: 4px;
+  right: 16px;
+  bottom: 3px;
+  height: 17px;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--fc, #2563eb) 55%, #cbd5e1);
+  border-radius: 3px;
+  background: #fff;
+  color: #111827;
+  font: 600 10px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  cursor: pointer;
+  z-index: 19;
+  pointer-events: auto;
+  padding: 0 3px;
+}
+.env-fbox--signature.env-fbox--sel .env-fbox-label {
+  position: absolute;
+  top: 4px;
+  left: 6px;
+  right: 6px;
+  text-align: center;
+}
 
 /* Type-specific styling */
 .env-fbox--signature {
@@ -855,18 +897,8 @@
   background: #eff6ff;
   box-shadow: 0 2px 8px rgba(37,99,235,.12);
 }
-.env-ftype-btn--req {
-  border-color: #bfdbfe;
-}
 .env-ftype-icon { font-size: 18px; line-height: 1; }
 .env-ftype-label { font-size: 10px; font-weight: 600; color: #475569; }
-.env-ftype-star {
-  position: absolute;
-  top: 4px;
-  right: 5px;
-  font-size: 9px;
-  color: #2563eb;
-}
 
 /* Field properties */
 .env-prop-panel { background: #f8fafc; border-radius: 0; }
@@ -885,17 +917,6 @@
   font-size: 13px;
   background: #fff;
   font-family: inherit;
-}
-.env-prop-check {
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-}
-.env-prop-check input[type="checkbox"] {
-  width: 18px;
-  height: 18px;
-  accent-color: #2563eb;
-  cursor: pointer;
 }
 .env-prop-position {
   font-size: 10px;
@@ -1190,4 +1211,47 @@
   font-size: 12px;
   font-weight: 400;
   color: #94a3b8;
+}
+
+/* ── Developer preview panel ─────────────────────────────────────────────── */
+.env-dev-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #1e293b;
+  color: #94a3b8;
+  font-size: 13px;
+  padding: 12px 18px;
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+.env-dev-badge {
+  background: #f59e0b;
+  color: #1c1917;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.env-dev-signer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+.env-dev-signer-row:last-child { border-bottom: none; }
+.env-dev-signer-info { flex: 1; min-width: 0; }
+.env-dev-signer-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: #1e293b;
+}
+.env-dev-signer-meta {
+  font-size: 12px;
+  color: #64748b;
+  margin-top: 2px;
 }

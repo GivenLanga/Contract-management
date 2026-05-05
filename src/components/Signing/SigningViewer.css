@@ -381,6 +381,18 @@
   background: rgba(240,253,244,.94);
   color: #166534;
 }
+.sv-doc-field--preview {
+  border-color: #16a34a;
+  background: rgba(255,255,255,.96);
+  color: #166534;
+}
+.sv-doc-field-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
 .sv-doc-field span {
   color: #dc2626;
   margin-left: 3px;
@@ -875,6 +887,12 @@
   animation: pulse-btn 2s infinite;
 }
 .sv-sign-btn:hover:not(:disabled) { transform: scale(1.02); box-shadow: 0 4px 16px rgba(0,0,0,.2); animation: none; }
+.sv-sign-btn--secondary {
+  background: rgba(255,255,255,.12);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,.42);
+  animation: none;
+}
 .sv-sign-btn:disabled {
   cursor: not-allowed;
   opacity: .62;
@@ -885,6 +903,15 @@
   50%       { box-shadow: 0 0 0 6px rgba(255,255,255,0); }
 }
 .sv-sign-legal { font-size: 10px; opacity: .6; margin: 0; line-height: 1.5; }
+.sv-sign-error {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(254,226,226,.18);
+  color: #fee2e2;
+  font-size: 11px;
+  line-height: 1.35;
+}
 
 .sv-signed-notice {
   display: flex;
@@ -998,6 +1025,17 @@
   background: #fafafa;
   display: block;
   border-bottom: 1px solid #f1f5f9;
+}
+.sv-sig-preview-images {
+  display: grid;
+  grid-template-columns: 1fr 88px;
+  align-items: stretch;
+}
+.sv-sig-preview-images .sv-sig-preview-img {
+  border-bottom: 1px solid #f1f5f9;
+}
+.sv-sig-preview-img--initials {
+  border-left: 1px solid #f1f5f9;
 }
 .sv-sig-preview-meta {
   display: flex;

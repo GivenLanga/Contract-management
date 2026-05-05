@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { getSigningDocument, requestSigning } from '../../services/signingStore';
 import { getLegalFolderFile, canRenderDocxPreview } from '../../services/legalFolderFileStore';
@@ -64,7 +64,14 @@ const initFields = (doc) =>
   (doc?.signingFields || []).map((field, index) => ({
     ...field,
     id: field.id || `field_${index}`,
+    required: true,
   }));
+
+const initialEnvelopeStep = (mode, fields) => {
+  if (mode === 'prepare') return 1;
+  if (mode === 'review') return 2;
+  return fields.length > 0 ? 2 : 1;
+};
 
 const typeFromBlob = (doc, blob) => {
   const explicitType = String(doc?.type || '').toLowerCase();
@@ -116,6 +123,8 @@ const docxPageVars = (metric = PAGE_FALLBACK) => ({
 export default function SigningEnvelope() {
   const { docId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const envelopeMode = searchParams.get('mode');
   const { user } = useAuth();
 
   const localDoc = useMemo(() => getSigningDocument(docId), [docId]);
@@ -231,7 +240,7 @@ export default function SigningEnvelope() {
     };
   }, [docId, localDoc]);
 
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState(() => initialEnvelopeStep(envelopeMode, initFields(doc)));
   const [signers, setSigners] = useState(() => initSigners(doc));
   const [fields, setFields] = useState(() => initFields(doc));
   const [selId, setSelId] = useState(null);
@@ -242,6 +251,7 @@ export default function SigningEnvelope() {
   const [preparing, setPreparing] = useState(false);
   const [prepSummary, setPrepSummary] = useState(null);
   const [error, setError] = useState('');
+  const [devPreview, setDevPreview] = useState(null);
 
   const canvasWrapRef = useRef(null);
   const docxMeasureRef = useRef(null);
@@ -254,9 +264,11 @@ export default function SigningEnvelope() {
 
   useEffect(() => {
     if (!doc) return;
+    const nextFields = initFields(doc);
     setSigners(initSigners(doc));
-    setFields(initFields(doc));
-  }, [docId, doc]);
+    setFields(nextFields);
+    setStep(initialEnvelopeStep(envelopeMode, nextFields));
+  }, [docId, doc, envelopeMode]);
 
   const selField = fields.find((f) => f.id === selId) ?? null;
   const canStep1 = signers.length > 0 && signers.every((s) => s.email && s.name);
@@ -635,8 +647,8 @@ export default function SigningEnvelope() {
       });
       setStep(2);
 
-      if (targetDocId !== docId) {
-        navigate(`/signing/envelope/${targetDocId}`, { replace: true });
+      if (targetDocId !== docId || envelopeMode !== 'review') {
+        navigate(`/signing/envelope/${targetDocId}?mode=review`, { replace: true });
       }
     } catch (err) {
       setError(err.message || 'Could not detect signing fields.');
@@ -664,7 +676,12 @@ export default function SigningEnvelope() {
         message,
       };
       if (isMongoId(docId)) {
-        await signingApi.requestSigning(docId, payload);
+        const result = await signingApi.requestSigning(docId, payload);
+        if (result?.devPreview?.enabled) {
+          setDevPreview(result.devPreview);
+          setSending(false);
+          return;
+        }
       } else {
         requestSigning(docId, payload, user);
       }
@@ -680,6 +697,7 @@ export default function SigningEnvelope() {
     const color = sc(si >= 0 ? si : 0);
     const ft = fieldTypeConfig(field.type);
     const isSel = field.id === selId;
+    const canInlineAssign = isSel && field.type === 'signature' && signers.length > 0;
 
     return (
       <div
@@ -707,6 +725,27 @@ export default function SigningEnvelope() {
               title="Resize field"
             />
           </>
+        )}
+        {canInlineAssign && (
+          <select
+            className="env-fbox-assignee"
+            value={field.assignedTo || ''}
+            title="Assign signature field"
+            onPointerDown={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => {
+              const signer = signers.find((s) => s.email === e.target.value);
+              updateField(field.id, { assignedTo: e.target.value, role: signer?.role || field.role || '' });
+            }}
+          >
+            <option value="" disabled>Assign...</option>
+            {signers.map((signer, index) => (
+              <option key={signer.id || signer.email || index} value={signer.email}>
+                {signer.name || signer.email || `Signer ${index + 1}`}
+              </option>
+            ))}
+          </select>
         )}
         {field.required && <span className="env-fbox-req">*</span>}
       </div>
@@ -858,7 +897,7 @@ export default function SigningEnvelope() {
                 disabled={!canStep1 || preparing}
                 onClick={prepareEnvelopeFields}
               >
-                {preparing ? 'Detecting fields...' : 'Detect Fields →'}
+                {preparing ? 'Detecting fields...' : 'Next →'}
               </button>
             </div>
           </div>
@@ -989,7 +1028,7 @@ export default function SigningEnvelope() {
                   {FIELD_TYPES.map((ft) => (
                     <button
                       key={ft.type}
-                      className={`env-ftype-btn${ft.required ? ' env-ftype-btn--req' : ''}`}
+                      className="env-ftype-btn"
                       onClick={() => addField(ft)}
                       draggable
                       onDragStart={(event) => onPaletteDragStart(event, ft)}
@@ -997,7 +1036,6 @@ export default function SigningEnvelope() {
                     >
                       {ft.icon && ft.icon !== ft.label && <span className="env-ftype-icon">{ft.icon}</span>}
                       <span className="env-ftype-label">{ft.label}</span>
-                      {ft.required && <span className="env-ftype-star">★</span>}
                     </button>
                   ))}
                 </div>
@@ -1021,15 +1059,6 @@ export default function SigningEnvelope() {
                         <option key={s.id} value={s.email}>{s.name || s.email || '(unnamed)'}</option>
                       ))}
                     </select>
-                  </label>
-
-                  <label className="env-prop-row env-prop-check">
-                    <span>Required</span>
-                    <input
-                      type="checkbox"
-                      checked={selField.required}
-                      onChange={(e) => updateField(selField.id, { required: e.target.checked })}
-                    />
                   </label>
 
                   <div className="env-prop-position">
@@ -1224,6 +1253,44 @@ export default function SigningEnvelope() {
                 {sending
                   ? 'Sending…'
                   : `✉ Send to ${signers.length} Signer${signers.length !== 1 ? 's' : ''}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ══ DEV PREVIEW ═════════════════════════════════════════════════════ */}
+      {devPreview && (
+        <div className="env-scroll-area">
+          <div className="env-centered-body">
+            <div className="env-dev-banner">
+              <span className="env-dev-badge">DEV</span>
+              Signing request sent. Open each link below to simulate that signer's experience.
+            </div>
+
+            <div className="env-card">
+              <h2>Signer Preview Links</h2>
+              {devPreview.signers.map((s, i) => (
+                <div key={i} className="env-dev-signer-row">
+                  <div className="env-dev-signer-info">
+                    <div className="env-dev-signer-name">{s.name}</div>
+                    <div className="env-dev-signer-meta">{s.email} · <em>{s.role}</em></div>
+                  </div>
+                  <a
+                    className="env-btn env-btn--primary"
+                    href={s.signingUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Sign as {s.name.split(' ')[0]} →
+                  </a>
+                </div>
+              ))}
+            </div>
+
+            <div className="env-step-footer">
+              <button className="env-btn env-btn--ghost" onClick={() => navigate('/signing')}>
+                ← Back to Dashboard
               </button>
             </div>
           </div>

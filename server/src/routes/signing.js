@@ -10,13 +10,20 @@ const emailService = require('../services/emailService');
 const signingService = require('../services/signingService');
 const idpService = require('../services/documentIdpService');
 const pdfFinalizationService = require('../services/pdfFinalizationService');
-const { buildSignatureEvidence } = require('../services/signatureEvidenceService');
+const { buildSignatureEvidence, normalizeSignatureMethod } = require('../services/signatureEvidenceService');
 const { protect } = require('../middleware/auth');
 const signingMetadataSchema = require('../schemas/signingDocumentMetadata.schema.json');
 
 const router = express.Router();
 
 const generateSignerToken = () => crypto.randomBytes(32).toString('hex');
+const parsedMaxSignatureImageBytes = Number(process.env.MAX_SIGNATURE_IMAGE_BYTES);
+const MAX_SIGNATURE_IMAGE_BYTES = Number.isFinite(parsedMaxSignatureImageBytes)
+  ? parsedMaxSignatureImageBytes
+  : 2 * 1024 * 1024;
+const IMAGE_DATA_URI_RE = /^data:image\/(png|jpe?g);base64,/i;
+
+const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
 
 const canManageDocument = (doc, user) => {
   if (!doc || !user) return false;
@@ -46,9 +53,130 @@ const fieldPosition = (field, bodyPosition) => {
 };
 
 const fieldBelongsToSigner = (field, signerEmail) =>
-  Boolean(field) && (!field.assignedTo || field.assignedTo === signerEmail);
+  Boolean(field) && (!field.assignedTo || normalizeEmail(field.assignedTo) === normalizeEmail(signerEmail));
 
 const signatureFieldTypes = new Set(['signature', 'initials']);
+const valueFieldTypes = new Set(['date', 'text', 'number', 'checkbox', 'radio', 'dropdown']);
+const requirePlacedFields = (fields = []) =>
+  (fields || []).map((field) => ({
+    ...(field?.toObject ? field.toObject() : field),
+    required: true,
+  }));
+
+const fieldValueIsComplete = (field, value) => {
+  if (field?.type === 'checkbox' || field?.type === 'radio') {
+    return value === true || value === 'true';
+  }
+  return String(value ?? '').trim().length > 0;
+};
+
+const validateImageDataUri = (value, label, { required = true } = {}) => {
+  if (!value) return required ? `${label} is required.` : null;
+  const text = String(value);
+  if (!IMAGE_DATA_URI_RE.test(text)) return `${label} must be a PNG or JPG image.`;
+  const payload = text.replace(/^data:image\/(png|jpe?g);base64,/i, '');
+  if (!payload || !/^[A-Za-z0-9+/=\s]+$/.test(payload)) return `${label} is not valid base64 image data.`;
+  const byteLength = Buffer.from(payload, 'base64').length;
+  if (!byteLength) return `${label} is empty.`;
+  if (byteLength > MAX_SIGNATURE_IMAGE_BYTES) return `${label} must be ${Math.round(MAX_SIGNATURE_IMAGE_BYTES / 1024 / 1024)} MB or smaller.`;
+  return null;
+};
+
+const validateSignaturePayload = ({ signatureData, initialsData, method }) => {
+  const errors = [];
+  const rawMethod = String(method || '').trim().toLowerCase();
+  const normalizedMethod = normalizeSignatureMethod(method);
+  const signatureError = validateImageDataUri(signatureData, 'Signature image');
+  const initialsError = validateImageDataUri(initialsData, 'Initials image', { required: false });
+
+  if (signatureError) errors.push(signatureError);
+  if (initialsError) errors.push(initialsError);
+  if (rawMethod && !['draw', 'drawn', 'upload', 'uploaded', 'type', 'typed'].includes(rawMethod)) errors.push('Unsupported signature method.');
+  if (!['drawn', 'uploaded', 'typed'].includes(normalizedMethod)) errors.push('Unsupported signature method.');
+
+  return errors;
+};
+
+const findPrimarySignatureField = ({ doc, signerEmail, fieldId }) => {
+  const fields = doc.signingFields || [];
+  if (!fields.length) return { field: null };
+
+  const pendingSignatureFields = fields.filter(
+    (field) => field.type === 'signature' && !field.filled && fieldBelongsToSigner(field, signerEmail)
+  );
+  const requestedField = fieldId ? fields.find((field) => field.id === fieldId) : null;
+
+  if (fieldId && !requestedField) {
+    return { status: 404, error: 'Signing field was not found.' };
+  }
+  if (requestedField && !fieldBelongsToSigner(requestedField, signerEmail)) {
+    return { status: 403, error: 'Field is not assigned to this signer.' };
+  }
+  if (requestedField?.type === 'signature') {
+    if (requestedField.filled) return { status: 409, error: 'This signature field is already complete.' };
+    return { field: requestedField };
+  }
+  if (requestedField && requestedField.type !== 'initials') {
+    return { status: 400, error: 'The selected field cannot receive a signature.' };
+  }
+
+  const assignedField = pendingSignatureFields.find(
+    (field) => normalizeEmail(field.assignedTo) === normalizeEmail(signerEmail)
+  ) || pendingSignatureFields.find((field) => !field.assignedTo);
+
+  if (!assignedField) {
+    return { status: 409, error: 'No pending signature field is assigned to this signer.' };
+  }
+
+  return { field: assignedField };
+};
+
+const signatureFieldsCompletedBySigning = ({ doc, signerEmail, assignedField }) => {
+  if (!assignedField) return [];
+  return (doc.signingFields || []).filter((field) => (
+    field.type === 'signature' &&
+    !field.filled &&
+    (
+      field.id === assignedField.id ||
+      normalizeEmail(field.assignedTo) === normalizeEmail(signerEmail) ||
+      !field.assignedTo
+    )
+  ));
+};
+
+const requiredFieldErrorsForSigning = ({ doc, signerEmail, assignedField, fieldValues, initialsData }) => {
+  const errors = [];
+  const signatureFieldIds = new Set(
+    signatureFieldsCompletedBySigning({ doc, signerEmail, assignedField }).map((field) => field.id)
+  );
+
+  for (const field of doc.signingFields || []) {
+    if (field.filled || !fieldBelongsToSigner(field, signerEmail)) continue;
+
+    if (field.type === 'signature') {
+      if (!signatureFieldIds.has(field.id)) {
+        errors.push({ fieldId: field.id, error: 'Required signature field is not complete.' });
+      }
+      continue;
+    }
+
+    if (field.type === 'initials') {
+      if (!initialsData) errors.push({ fieldId: field.id, error: 'Required initials field is not complete.' });
+      continue;
+    }
+
+    if (valueFieldTypes.has(field.type)) {
+      const value = Object.prototype.hasOwnProperty.call(fieldValues || {}, field.id)
+        ? fieldValues[field.id]
+        : field.fieldValue;
+      if (!fieldValueIsComplete(field, value)) {
+        errors.push({ fieldId: field.id, error: 'Required field is not complete.' });
+      }
+    }
+  }
+
+  return errors;
+};
 
 const applyFieldValues = ({ doc, signerEmail, fieldValues, signedAt }) => {
   if (!fieldValues || typeof fieldValues !== 'object') return;
@@ -63,6 +191,26 @@ const applyFieldValues = ({ doc, signerEmail, fieldValues, signedAt }) => {
   }
 };
 
+const applyInitialsFields = ({ doc, signerEmail, signedAt, hasInitials }) => {
+  if (!hasInitials) return;
+  for (const field of doc.signingFields || []) {
+    if (field.type !== 'initials') continue;
+    if (field.filled) continue;
+    if (!fieldBelongsToSigner(field, signerEmail)) continue;
+    field.filled = true;
+    field.filledBy = signerEmail;
+    field.filledAt = signedAt;
+  }
+};
+
+const applySignatureFields = ({ doc, signerEmail, signedAt, assignedField }) => {
+  for (const field of signatureFieldsCompletedBySigning({ doc, signerEmail, assignedField })) {
+    field.filled = true;
+    field.filledBy = signerEmail;
+    field.filledAt = signedAt;
+  }
+};
+
 // Validate a field value against its type constraints
 const validateFieldValue = (field, value) => {
   const { type, fieldMeta } = field || {};
@@ -72,6 +220,7 @@ const validateFieldValue = (field, value) => {
     return null;
   }
   if (type === 'number') {
+    if (value === undefined || value === null || value === '') return null;
     const num = Number(value);
     if (isNaN(num)) return 'Field requires a numeric value.';
     if (fieldMeta?.min !== undefined && num < fieldMeta.min) return `Value must be at least ${fieldMeta.min}.`;
@@ -83,6 +232,7 @@ const validateFieldValue = (field, value) => {
     return null;
   }
   if (type === 'checkbox') {
+    if (value === undefined || value === null || value === '') return null;
     if (value !== true && value !== false && value !== 'true' && value !== 'false') return 'Checkbox must be true or false.';
     return null;
   }
@@ -99,7 +249,7 @@ const isSignerTurn = (doc, signerEmail) => {
   if (doc.signingOrder !== 'sequential') return true;
   const sorted = [...(doc.signers || [])].sort((a, b) => (a.order || 0) - (b.order || 0));
   const nextPending = sorted.find((s) => s.signingStatus !== 'signed');
-  return !nextPending || nextPending.email === signerEmail;
+  return !nextPending || normalizeEmail(nextPending.email) === normalizeEmail(signerEmail);
 };
 
 // GET /api/signing/pending — docs awaiting signatures
@@ -173,9 +323,7 @@ router.get('/public/sign/:token', async (req, res) => {
         signingStatus: signer.signingStatus,
         viewedAt: signer.viewedAt,
       },
-      fields: (doc.signingFields || []).filter(
-        (f) => !f.assignedTo || f.assignedTo === signer.email
-      ),
+      fields: requirePlacedFields((doc.signingFields || []).filter((f) => fieldBelongsToSigner(f, signer.email))),
       isTurn: isSignerTurn(doc, signer.email),
     });
   } catch (err) {
@@ -207,7 +355,8 @@ router.post('/public/sign/:token', async (req, res) => {
   try {
     const { signatureData, initialsData, method, fieldId, page, position, fieldValues, signatureTelemetry } = req.body;
 
-    if (!signatureData) return res.status(400).json({ error: 'Signature data required.' });
+    const payloadErrors = validateSignaturePayload({ signatureData, initialsData, method });
+    if (payloadErrors.length) return res.status(400).json({ error: payloadErrors[0], errors: payloadErrors });
 
     const doc = await Document.findOne({ 'signers.token': req.params.token })
       .populate('uploadedBy', 'name email');
@@ -238,11 +387,21 @@ router.post('/public/sign/:token', async (req, res) => {
       if (errors.length) return res.status(422).json({ error: 'Field validation failed.', fieldErrors: errors });
     }
 
-    const assignedField = doc.signingFields.find((f) => fieldId && f.id === fieldId && fieldBelongsToSigner(f, signer.email))
-      || doc.signingFields.find((f) => f.assignedTo === signer.email && !f.filled)
-      || doc.signingFields.find((f) => !f.assignedTo && !f.filled);
-    if (fieldId && !assignedField) {
-      return res.status(403).json({ error: 'Field is not assigned to this signer.' });
+    const fieldSelection = findPrimarySignatureField({ doc, signerEmail: signer.email, fieldId });
+    if (fieldSelection.error) {
+      return res.status(fieldSelection.status || 400).json({ error: fieldSelection.error });
+    }
+    const assignedField = fieldSelection.field;
+
+    const requiredErrors = requiredFieldErrorsForSigning({
+      doc,
+      signerEmail: signer.email,
+      assignedField,
+      fieldValues,
+      initialsData,
+    });
+    if (requiredErrors.length) {
+      return res.status(422).json({ error: 'Required signing fields are incomplete.', fieldErrors: requiredErrors });
     }
 
     const existingSig = await Signature.findOne({ document: doc._id, signerEmail: signer.email });
@@ -280,21 +439,16 @@ router.post('/public/sign/:token', async (req, res) => {
       evidence: identityEvidence.evidence,
     });
 
-    // Mark field filled
-    if (assignedField) {
-      assignedField.filled = true;
-      assignedField.filledBy = signer.email;
-      assignedField.filledAt = signedAt;
-    }
-
+    applySignatureFields({ doc, signerEmail: signer.email, signedAt, assignedField });
     applyFieldValues({ doc, signerEmail: signer.email, fieldValues, signedAt });
+    applyInitialsFields({ doc, signerEmail: signer.email, signedAt, hasInitials: Boolean(initialsData) });
 
     // Update per-signer state
     signer.signingStatus = 'signed';
     signer.signedAt = signedAt;
 
-    // Check if all required fields are now filled
-    const allFilled = doc.signingFields.every((f) => f.filled || !f.required);
+    // Every placed field is required, so the document completes only when all fields are filled.
+    const allFilled = doc.signingFields.every((f) => f.filled);
     if (allFilled) doc.status = 'Signed';
 
     await doc.save();
@@ -356,7 +510,7 @@ router.post('/:docId/prepare', protect, async (req, res) => {
       doc.mimetype = 'application/pdf';
       doc.type = 'pdf';
     }
-    doc.signingFields = result.fields;
+    doc.signingFields = requirePlacedFields(result.fields);
     doc.signers = (signers || []).map((signer, index) => ({
       email: signer.email,
       name: signer.name,
@@ -381,7 +535,7 @@ router.post('/:docId/prepare', protect, async (req, res) => {
       userAgent: req.get('User-Agent'),
     });
 
-    res.json({ document: doc, fields: result.fields, preparation: doc.signingPreparation });
+    res.json({ document: doc, fields: requirePlacedFields(result.fields), preparation: doc.signingPreparation });
   } catch (err) {
     try {
       await Document.findByIdAndUpdate(req.params.docId, { 'signingPreparation.status': 'failed', 'signingPreparation.errorMessage': err.message });
@@ -424,7 +578,8 @@ router.post('/:docId/sign', protect, async (req, res) => {
   try {
     const { signatureData, initialsData, method, fieldId, page, position, signerRole, fieldValues, signatureTelemetry } = req.body;
 
-    if (!signatureData) return res.status(400).json({ error: 'Signature data required.' });
+    const payloadErrors = validateSignaturePayload({ signatureData, initialsData, method });
+    if (payloadErrors.length) return res.status(400).json({ error: payloadErrors[0], errors: payloadErrors });
 
     const doc = await Document.findById(req.params.docId).populate('uploadedBy', 'name email');
     if (!doc) return res.status(404).json({ error: 'Document not found.' });
@@ -435,12 +590,11 @@ router.post('/:docId/sign', protect, async (req, res) => {
       return res.status(403).json({ error: 'It is not your turn to sign. Please wait for prior signers to complete.' });
     }
 
-    const assignedField = doc.signingFields.find((f) => fieldId && f.id === fieldId && fieldBelongsToSigner(f, req.user.email))
-      || doc.signingFields.find((f) => f.assignedTo === req.user.email && !f.filled)
-      || doc.signingFields.find((f) => !f.assignedTo && !f.filled);
-    if ((!assignedField || !fieldBelongsToSigner(assignedField, req.user.email)) && req.user.role === 'external') {
-      return res.status(403).json({ error: 'You are not authorized to sign this document.' });
+    const fieldSelection = findPrimarySignatureField({ doc, signerEmail: req.user.email, fieldId });
+    if (fieldSelection.error) {
+      return res.status(fieldSelection.status || 400).json({ error: fieldSelection.error });
     }
+    const assignedField = fieldSelection.field;
 
     // Validate non-signature field values
     if (fieldValues && typeof fieldValues === 'object') {
@@ -456,6 +610,17 @@ router.post('/:docId/sign', protect, async (req, res) => {
         if (err) errors.push({ fieldId: fid, error: err });
       }
       if (errors.length) return res.status(422).json({ error: 'Field validation failed.', fieldErrors: errors });
+    }
+
+    const requiredErrors = requiredFieldErrorsForSigning({
+      doc,
+      signerEmail: req.user.email,
+      assignedField,
+      fieldValues,
+      initialsData,
+    });
+    if (requiredErrors.length) {
+      return res.status(422).json({ error: 'Required signing fields are incomplete.', fieldErrors: requiredErrors });
     }
 
     const existingSig = await Signature.findOne({ document: doc._id, signerEmail: req.user.email });
@@ -475,6 +640,7 @@ router.post('/:docId/sign', protect, async (req, res) => {
           y: effectivePosition?.y || 200,
           width: effectivePosition?.width || 200,
           height: effectivePosition?.height || 80,
+          origin: effectivePosition?.origin || 'top-left',
           initialsBase64: initialsData,
           signerName: req.user.name,
           signerEmail: req.user.email,
@@ -508,23 +674,18 @@ router.post('/:docId/sign', protect, async (req, res) => {
       evidence: identityEvidence.evidence,
     });
 
-    // Mark field filled
-    if (assignedField) {
-      assignedField.filled = true;
-      assignedField.filledBy = req.user.email;
-      assignedField.filledAt = signedAt;
-    }
-
+    applySignatureFields({ doc, signerEmail: req.user.email, signedAt, assignedField });
     applyFieldValues({ doc, signerEmail: req.user.email, fieldValues, signedAt });
+    applyInitialsFields({ doc, signerEmail: req.user.email, signedAt, hasInitials: Boolean(initialsData) });
 
     // Update per-signer state
-    const signerRecord = doc.signers.find((s) => s.email === req.user.email || s.userId?.toString() === req.user._id?.toString());
+    const signerRecord = doc.signers.find((s) => normalizeEmail(s.email) === normalizeEmail(req.user.email) || s.userId?.toString() === req.user._id?.toString());
     if (signerRecord) {
       signerRecord.signingStatus = 'signed';
       signerRecord.signedAt = signedAt;
     }
 
-    const allFilled = doc.signingFields.every((f) => f.filled || !f.required);
+    const allFilled = doc.signingFields.every((f) => f.filled);
     if (allFilled) doc.status = 'Signed';
 
     await doc.save();
@@ -629,7 +790,7 @@ router.post('/:docId/request', protect, async (req, res) => {
         doc.mimetype = 'application/pdf';
         doc.type = 'pdf';
       }
-      doc.signingFields = preparationForRequest.fields;
+      doc.signingFields = requirePlacedFields(preparationForRequest.fields);
     } else if (fields && fields.length > 0) {
       doc.signingFields = fields.map((field, index) => ({
         ...field,
@@ -638,7 +799,7 @@ router.post('/:docId/request', protect, async (req, res) => {
         coordinateOrigin: field.coordinateOrigin || 'normalized',
         source: field.source || 'manual',
         confidence: Number.isFinite(Number(field.confidence)) ? Number(field.confidence) : 1,
-        required: field.required !== false,
+        required: true,
         filled: false,
       }));
     }
@@ -689,7 +850,20 @@ router.post('/:docId/request', protect, async (req, res) => {
       userAgent: req.get('User-Agent'),
     });
 
-    res.json({ message: 'Signing requests sent.', document: doc });
+    const appUrl = process.env.APP_URL || 'http://localhost:5173';
+    const devPreview = process.env.NODE_ENV === 'development'
+      ? {
+          enabled: true,
+          signers: doc.signers.map((s) => ({
+            name: s.name,
+            email: s.email,
+            role: s.role || 'Signatory',
+            signingUrl: `${appUrl}/sign/external/${s.token}`,
+          })),
+        }
+      : undefined;
+
+    res.json({ message: 'Signing requests sent.', document: doc, devPreview });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -843,7 +1017,7 @@ router.get('/:docId/metadata', protect, async (req, res) => {
             : doc.status === 'Signed' ? 'signed'
               : doc.status === 'Pending Signature' ? 'pending'
                 : doc.status === 'Declined' ? 'declined' : 'draft',
-        fields: doc.signingFields || [],
+        fields: requirePlacedFields(doc.signingFields || []),
         routing: {
           mode: doc.signingOrder || 'parallel',
           signers: doc.signers || [],
@@ -876,7 +1050,7 @@ router.post('/:docId/finalize', protect, async (req, res) => {
     if (!canManageDocument(doc, req.user)) return res.status(403).json({ error: 'Forbidden.' });
 
     const signatures = await Signature.find({ document: doc._id }).sort({ signedAt: 1 });
-    const requiredFields = doc.signingFields?.filter((f) => f.required) || [];
+    const requiredFields = doc.signingFields || [];
     const allRequiredSigned = requiredFields.every((f) => f.filled);
     if (!allRequiredSigned && req.body.allowIncomplete !== true) {
       return res.status(409).json({ error: 'Required signing fields are not complete.' });

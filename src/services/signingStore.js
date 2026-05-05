@@ -150,6 +150,7 @@ export const requestSigning = (docId, payload, user) => {
     id: field.id || `field_${index}`,
     assignedTo: field.assignedTo || signers[index]?.email || '',
     role: field.role || signers[index]?.role || `Signer ${index + 1}`,
+    required: true,
     filled: false,
     fieldValue: undefined,
   }));
@@ -189,7 +190,9 @@ export const signDocument = (docId, payload, user) => {
 
   const signerEmail = user?.email || payload.signerEmail || 'local-signer@contractiq.local';
   const signerName = user?.name || payload.signerName || signerEmail;
-  const fields = doc.signingFields?.length ? [...doc.signingFields] : [makeField(payload.signerRole || 'Signatory', 0, signerEmail)];
+  const fields = doc.signingFields?.length
+    ? doc.signingFields.map((field) => ({ ...field, required: true }))
+    : [makeField(payload.signerRole || 'Signatory', 0, signerEmail)];
   const signerOwnsField = (field) => field.assignedTo === signerEmail || !field.assignedTo;
   const fieldValues = payload.fieldValues && typeof payload.fieldValues === 'object' ? payload.fieldValues : {};
   const signatureIndex = fields.findIndex((field) =>
@@ -216,6 +219,18 @@ export const signDocument = (docId, payload, user) => {
     filledAt: signedAt,
     fieldValue: SIGNATURE_FIELD_TYPES.has(field.type) ? field.fieldValue : defaultFieldValue(field, { email: signerEmail, name: signerName }),
   };
+
+  fields.forEach((item, itemIndex) => {
+    if (!SIGNATURE_FIELD_TYPES.has(item.type)) return;
+    if (item.filled || !signerOwnsField(item)) return;
+    fields[itemIndex] = {
+      ...item,
+      assignedTo: item.assignedTo || signerEmail,
+      filled: true,
+      filledBy: signerEmail,
+      filledAt: signedAt,
+    };
+  });
 
   fields.forEach((item, itemIndex) => {
     if (SIGNATURE_FIELD_TYPES.has(item.type)) return;
@@ -253,7 +268,7 @@ export const signDocument = (docId, payload, user) => {
   };
 
   const signatures = [...(doc.signatures || []), signature];
-  const allSigned = fields.every((item) => item.filled || !item.required);
+  const allSigned = fields.every((item) => item.filled);
   const performedBy = { name: signerName, email: signerEmail };
 
   saveRecord({

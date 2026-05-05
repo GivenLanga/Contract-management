@@ -25,14 +25,25 @@ const NAME_WORDS = /\b(print name|printed name|name)\b/i;
 const CHECKBOX_WORDS = /\b(check\s*box|checkbox|tick\s*box|consent|agree|acknowledge)\b/i;
 const RADIO_WORDS = /\b(radio|option)\b/i;
 const DROPDOWN_WORDS = /\b(drop\s*down|dropdown|select)\b/i;
-const UNDERLINE_RUN_PATTERN = /_{4,}/g;
+const UNDERLINE_RUN_PATTERN = /_{3,}/g;
 const EXPLICIT_DATE_WORDS = /\b(date|dated)\b/i;
-const LEGAL_DATE_TEXT_WORDS = /\b(on this|day of)\b/gi;
-const SIGNATURE_LINE_WORDS = /\b(sign|signature|sign here|signed by|authorized signatory|signatory|for and on behalf)\b/i;
+const SIGNATURE_LINE_WORDS = /\b(sign|signature|sign here|signed by|authorized signatory|authorised signatory|signatory|for and on behalf)\b/i;
 const EXECUTION_PLACE_WORDS = /\bsigned\s+at\b/i;
-const TEXT_LINE_WORDS = /\b(full name|print name|printed name|name|title|capacity)\b/i;
-const NON_SIGNATURE_FIELD_WORDS = /\b(full name|print name|printed name|name|capacity|title|address)\b\s*:?/i;
+const SIGNED_ON_RE = /\bsigned\s+on\b/i;
+const EXEC_BLOCK_HEADER_RE = /^(?:for(?:\s+and\s+on\s+behalf\s+of)?|signed\s+(?:by|for)|executed\s+(?:by|for)|on\s+behalf\s+of)\s*:/i;
+const FIELD_LINE_RE = /_{3,}|^(?:signature|date|name|initial|title|designation|designatation|position|capacity|address|witness)\s*:/i;
+// Matches any fragment of a "dated at ___ on this ___ day of ___ 20___" clause.
+// Each fragment in its own table cell also needs to be detected independently.
+const INLINE_DATE_CLAUSE_RE = /\bdated\s+at\b|\bday\s+of\b|\bon\s+this\b/i;
+const DAY_OF_DATE_RE = /\bday\s+of\b/i;
+const ON_THIS_DATE_RE = /\bon\s+this\b/i;
+// Matches a year stub like "20___" — the trailing blank of an execution date clause.
+const YEAR_STUB_RE = /\b(?:19|20)\d{0,2}[\s_]/;
+const TEXT_LINE_WORDS = /\b(full name|print name|printed name|name|title|designation|designatation|position|capacity)\b/i;
+const NON_SIGNATURE_FIELD_WORDS = /\b(full name|print name|printed name|name|capacity|title|designation|designatation|position|address)\b\s*:?/i;
 const TEXT_WORD_PATTERN = /\b[A-Za-z][A-Za-z0-9'-]*\b/g;
+const EXPLICIT_SIGNATURE_CUE_RE = /\b(sign\s+here|signed\s+by|for\s+and\s+on\s+behalf|authori[sz]ed\s+signatory)\b/i;
+const SIGNATURE_LABEL_RE = /(?:^|\s)(?:signature|sign|signatory)\s*(?::|_|\s*$)/i;
 const SUPPORTED_FIELD_TYPES = new Set([
   'signature',
   'initials',
@@ -174,7 +185,7 @@ const fieldFromUnderlineRun = ({ type, pageNumber, run, metric, context, confide
     type,
     page: pageNumber,
     x: Math.max(0, run.x),
-    y: Math.max(0, run.y - 8),
+    y: Math.max(0, run.y),
     width: Math.max(1, Math.min(run.width, pageWidth - run.x - 24)),
     height,
     confidence,
@@ -248,7 +259,7 @@ const firstWordAfter = (text = '', startIndex = 0) => {
   return null;
 };
 
-const textItemBoxes = (line, metric = {}) => {
+const textItemBoxes = (line) => {
   const items = Array.isArray(line.items) ? line.items : [];
   if (!items.length) return [];
 
@@ -416,77 +427,154 @@ const textFieldFromLine = (line, pageNumber, metric, runs = line.runs) => {
   });
 };
 
-const legalDateValueFieldsFromLine = (line, pageNumber, metric, runs = line.runs) => {
-  if (!runs.length) return [];
+// Detects "Signed at ___" (place → 'text') and "Signed on ___" (date → 'date') underlines.
+// These are NOT signature fields — EXECUTION_PLACE_WORDS already zeroes their signature
+// confidence, but nothing was creating a field for them at all.
+const signedAtOrOnFieldFromLine = (line, pageNumber, metric, runs = line.runs) => {
+  if (!runs.length) return null;
+  const text = line.text;
+  const atMatch = text.match(EXECUTION_PLACE_WORDS); // /\bsigned\s+at\b/i
+  const onMatch = !atMatch && text.match(SIGNED_ON_RE); // /\bsigned\s+on\b/i
+  const cueMatch = atMatch || onMatch;
+  if (!cueMatch) return null;
+  const cueEnd = cueMatch.index + cueMatch[0].length;
+  const match = firstRunAfterTextIndex(line, runs, cueEnd);
+  if (!match) return null;
+  return fieldFromUnderlineRun({
+    type: atMatch ? 'text' : 'date',
+    pageNumber,
+    metric,
+    run: match.run,
+    context: text,
+    confidence: 0.82,
+    detector: atMatch ? 'pdfjs-text-underline-signed-at' : 'pdfjs-text-underline-signed-on',
+    detection: { cue: cueMatch[0].toLowerCase(), nextText: match.nextWord?.text || '' },
+  });
+};
+
+const inlineDateClauseRunType = (lineText, run, locationBoundary, dateRunIndex = -1, dateRunCount = 0) => {
+  const start = Math.floor(finiteNumber(run.textIndex, 0));
+  const end = Math.ceil(finiteNumber(run.textEnd, start));
+  const mid = (start + end) / 2;
+  const before = lineText.slice(0, start);
+
+  if (locationBoundary !== null && mid < locationBoundary) {
+    return { type: 'text', role: 'execution-place' };
+  }
+
+  if (/\b(?:19|20)\d{0,2}\s*$/.test(before)) {
+    return { type: 'number', role: 'year' };
+  }
+
+  if (dateRunIndex === 0) {
+    return { type: 'number', role: 'day' };
+  }
+
+  if (dateRunIndex === dateRunCount - 1 && dateRunCount >= 3 && YEAR_STUB_RE.test(lineText)) {
+    return { type: 'number', role: 'year' };
+  }
+
+  if (dateRunIndex > 0 && dateRunIndex < dateRunCount) {
+    return { type: 'text', role: 'month' };
+  }
+
+  if (/\bon\s+this\b/i.test(before) && !/\bday\s+of\b/i.test(before)) {
+    return { type: 'number', role: 'day' };
+  }
+
+  if (/\bday\s+of\b/i.test(before)) {
+    return { type: 'text', role: 'month' };
+  }
+
+  return { type: 'text', role: 'date-fragment' };
+};
+
+// Handles "Dated at _______ on this _______ day of _______ 20___" style inline clauses.
+// These are fragments of one legal execution sentence, not full date-picker values:
+// place/month are text and day/year are number fields.
+const inlineDateClauseFieldsFromLine = (line, pageNumber, metric, runs = line.runs) => {
+  if (!runs.length || !INLINE_DATE_CLAUSE_RE.test(line.text)) return [];
+
+  const text = line.text;
+  // Find the boundary where the location blank ends and the date blanks begin.
+  // "on this" marks the start of the date portion; without it, all blanks are dates.
+  const onThisMatch = text.match(/\bon\s+this\b/i);
+  const locationBoundary = onThisMatch ? onThisMatch.index : null;
+  // Shared ID for every blank on this line so assignFieldsToSigners groups them
+  // as one logical unit — prevents round-robin from splitting them across signatories.
+  const clauseLineId = `idc_${pageNumber}_${Math.round(line.y)}`;
 
   const fields = [];
-  for (const cueMatch of line.text.matchAll(LEGAL_DATE_TEXT_WORDS)) {
-    const cueIndex = cueMatch.index;
-    const cueEnd = cueIndex + cueMatch[0].length;
-    const match = firstRunAfterTextIndex(line, runs, cueEnd);
-    if (!match) continue;
+  const sortedRuns = [...runs].sort((a, b) => a.x - b.x);
+  const dateRuns = sortedRuns.filter((run) => {
+    const runMid = ((run.textIndex || 0) + (run.textEnd || run.textIndex || 0)) / 2;
+    return locationBoundary === null || runMid >= locationBoundary;
+  });
 
-    fields.push(fieldFromUnderlineRun({
-      type: 'text',
-      pageNumber,
-      metric,
-      run: match.run,
-      context: line.text,
-      confidence: 0.78,
-      detector: 'pdfjs-text-underline-legal-date-text',
-      detection: {
-        cue: line.text.slice(cueIndex, Math.min(line.text.length, cueIndex + 40)).trim(),
-        nextText: match.nextWord?.text || '',
-        underlineRunCount: 1,
-      },
-    }));
-  }
-
-  const numberPattern = /\d+(?=_|\b)/g;
-  for (const numberMatch of line.text.matchAll(numberPattern)) {
-    const cueIndex = numberMatch.index;
-    const cueEnd = cueIndex + numberMatch[0].length;
-    const match = firstRunAfterTextIndex(line, runs, cueEnd);
-    if (!match) continue;
-
-    const duplicate = fields.some((field) =>
-      overlapRatio(field, {
-        page: pageNumber,
-        x: match.run.x,
-        y: Math.max(0, match.run.y - 8),
-        width: match.run.width,
-        height: 28,
-      }) > 0.35
+  for (const run of sortedRuns) {
+    const classification = inlineDateClauseRunType(
+      text,
+      run,
+      locationBoundary,
+      dateRuns.indexOf(run),
+      dateRuns.length
     );
-    if (duplicate) continue;
-
-    fields.push(fieldFromUnderlineRun({
-      type: 'number',
+    const field = fieldFromUnderlineRun({
+      type: classification.type,
       pageNumber,
       metric,
-      run: match.run,
-      context: line.text,
-      confidence: 0.76,
-      detector: 'pdfjs-text-underline-number',
+      run,
+      context: text,
+      confidence: 0.80,
+      detector: 'pdfjs-text-underline-date-clause',
       detection: {
-        cue: numberMatch[0],
-        nextText: match.nextWord?.text || '',
-        underlineRunCount: 1,
+        isInlineDateClause: true,
+        clauseLineId,
+        fragmentRole: classification.role,
+        underlineRunCount: runs.length,
       },
-    }));
+    });
+    if (field) fields.push(field);
   }
-
   return fields;
 };
 
+const wordCount = (value = '') =>
+  (String(value).match(TEXT_WORD_PATTERN) || []).length;
+
+const looksLikeBodyText = (value = '') => {
+  const text = String(value || '').trim();
+  return wordCount(text) > 10 && /[.;,]/.test(text) && !/_{3,}/.test(text);
+};
+
+const looksLikeProseLine = (value = '') => {
+  const text = String(value || '').trim();
+  if (!text || /_{3,}|:\s*$/.test(text)) return false;
+  if (SIGNATURE_LABEL_RE.test(text)) return false;
+  return wordCount(text) >= 8;
+};
+
+const hasSignatureFieldCue = (value = '') => {
+  const text = String(value || '').trim();
+  if (!text) return false;
+  if (looksLikeProseLine(text)) return false;
+  if (EXPLICIT_SIGNATURE_CUE_RE.test(text)) return true;
+  if (SIGNATURE_LABEL_RE.test(text)) return true;
+  return /^(?:signature|sign|signatory|authori[sz]ed signatory)\b/i.test(text) && wordCount(text) <= 6;
+};
+
 const signatureConfidenceForContext = (lineText, neighborText) => {
+  const line = String(lineText || '').trim();
   const context = `${lineText} ${neighborText}`;
   if (NON_SIGNATURE_FIELD_WORDS.test(lineText)) return 0;
   if (EXECUTION_PLACE_WORDS.test(lineText) && !SIGNATURE_LINE_WORDS.test(lineText)) return 0;
+  if (/\bduly\s+authori[sz]ed\s+to\s+sign\b/i.test(context) && !hasSignatureFieldCue(line)) return 0;
+  if (looksLikeProseLine(line)) return 0;
+  if (looksLikeBodyText(line) && !EXPLICIT_SIGNATURE_CUE_RE.test(line)) return 0;
   if (/\bfor and on behalf\b/i.test(context)) return 0.88;
-  if (SIGNATURE_LINE_WORDS.test(context)) return 0.86;
+  if (hasSignatureFieldCue(line) || hasSignatureFieldCue(neighborText)) return 0.86;
   if (/\bsigned by\b/i.test(context)) return 0.82;
-  if (/\bwitness\b/i.test(context)) return 0.58;
+  if (/\bwitness\b/i.test(context) && !looksLikeBodyText(line)) return 0.58;
   return 0;
 };
 
@@ -517,18 +605,6 @@ const lineBounds = (line, metric = {}) => {
   };
 };
 
-const lineTextBox = (line, metric = {}) => {
-  const bounds = lineBounds(line, metric);
-  const height = Math.max(10, bounds.height || 10);
-  return {
-    x: bounds.x,
-    y: Math.max(0, bounds.y - Math.min(3, height * 0.25)),
-    width: Math.max(0, bounds.right - bounds.x),
-    height: height + 4,
-    right: bounds.right,
-  };
-};
-
 const rectsOverlapArea = (a, b) => {
   const left = Math.max(a.x, b.x);
   const right = Math.min(a.x + a.width, b.x + b.width);
@@ -552,15 +628,27 @@ const cellContainsRectCenter = (cell, rect) => {
     cy <= cell.y + cell.height + 2;
 };
 
+const cellContainsPoint = (cell, x, y) =>
+  x >= cell.x - 2 &&
+  x <= cell.x + cell.width + 2 &&
+  y >= cell.y - 2 &&
+  y <= cell.y + cell.height + 2;
+
+const cellHasPlacedField = (cell, fields = []) =>
+  fields.some((field) => cellContainsRectCenter(cell, field));
+
+const textBoxBelongsToCell = (box, cell) => {
+  if (cellContainsRectCenter(cell, box)) return true;
+  const xOverlap = rangesOverlap(box.x, box.x + box.width, cell.x, cell.x + cell.width);
+  const yOverlap = rangesOverlap(box.y, box.y + box.height, cell.y, cell.y + cell.height);
+  return xOverlap / Math.max(1, box.width) >= 0.35 &&
+    yOverlap / Math.max(1, Math.min(box.height, cell.height)) >= 0.35;
+};
+
 const textBoxesInCell = (lines, cell, metric) =>
   lines
     .flatMap((line) => textItemBoxes(line, metric))
-    .filter((box) =>
-      box.width > 0 &&
-      box.y + box.height >= cell.y - 2 &&
-      box.y <= cell.y + cell.height + 2 &&
-      rangesOverlap(box.x, box.x + box.width, cell.x, cell.x + cell.width) > 0
-    )
+    .filter((box) => box.width > 0 && textBoxBelongsToCell(box, cell))
     .map((box) => ({
       x: Math.max(cell.x, box.x - 2),
       y: Math.max(cell.y, box.y - 2),
@@ -569,12 +657,78 @@ const textBoxesInCell = (lines, cell, metric) =>
     }))
     .filter((box) => box.width > 0 && box.height > 0);
 
+const cellTextForLine = (line, cell) => {
+  const items = Array.isArray(line.items) ? line.items : [];
+  if (items.length) {
+    return items
+      .filter((item) => {
+        const text = String(item.text || '');
+        if (!text.trim() || /^_+$/.test(text.trim())) return false;
+        const height = Math.max(10, finiteNumber(item.height, line.height || 10));
+        return textBoxBelongsToCell({
+          x: item.x,
+          y: Math.max(0, item.y - Math.min(3, height * 0.25)),
+          width: item.width,
+          height: height + 4,
+        }, cell);
+      })
+      .sort((a, b) => a.x - b.x)
+      .map((item) => item.text)
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  const bounds = lineBounds(line);
+  const lineBox = {
+    x: bounds.x,
+    y: bounds.y - Math.max(4, finiteNumber(bounds.height, 12) * 0.25),
+    width: Math.max(0, bounds.right - bounds.x),
+    height: Math.max(10, finiteNumber(bounds.height, 12) + 4),
+  };
+  return textBoxBelongsToCell(lineBox, cell) ? String(line.text || '').trim() : '';
+};
+
+const cellHasBlankMarkerForLine = (line, cell) => {
+  const items = Array.isArray(line.items) ? line.items : [];
+  if (items.length) {
+    return items.some((item) => {
+      const text = String(item.text || '');
+      if (!/_{3,}/.test(text)) return false;
+      const height = Math.max(10, finiteNumber(item.height, line.height || 10));
+      return textBoxBelongsToCell({
+        x: item.x,
+        y: Math.max(0, item.y - Math.min(3, height * 0.25)),
+        width: item.width,
+        height: height + 4,
+      }, cell);
+    });
+  }
+
+  if (!/_{3,}/.test(String(line.text || ''))) return false;
+  const bounds = lineBounds(line);
+  return textBoxBelongsToCell({
+    x: bounds.x,
+    y: bounds.y - Math.max(4, finiteNumber(bounds.height, 12) * 0.25),
+    width: Math.max(0, bounds.right - bounds.x),
+    height: Math.max(10, finiteNumber(bounds.height, 12) + 4),
+  }, cell);
+};
+
+// A target cell is occupied only by real text. Pure underscores are visual blanks
+// and remain valid designated signing areas.
 const cellHasText = (cell, lines, metric) =>
-  textBoxesInCell(lines, cell, metric)
-    .some((box) => cellContainsRectCenter(cell, box) || rectOverlapRatio(cell, box) > 0.02);
+  lines.some((line) => Boolean(cellTextForLine(line, cell))) ||
+    textBoxesInCell(lines, cell, metric).some((box) => cellContainsRectCenter(cell, box));
 
 const tableFieldTypeForLine = (lineText = '') => {
+  if (looksLikeProseLine(lineText)) return null;
+  if (/\bdated\s+at\b/i.test(lineText) || EXECUTION_PLACE_WORDS.test(lineText)) return 'text';
+  if (ON_THIS_DATE_RE.test(lineText)) return 'number';       // "on this ___" → day number
+  if (DAY_OF_DATE_RE.test(lineText)) return 'text';          // "day of ___" → month text
+  if (YEAR_STUB_RE.test(lineText)) return 'number';          // "20___" year-stub → year number
   if (DATE_WORDS.test(lineText)) return 'date';
+  if (SIGNED_ON_RE.test(lineText)) return 'date';
   if (TEXT_LINE_WORDS.test(lineText)) return 'text';
   if (SIGNATURE_LINE_WORDS.test(lineText) && !NON_SIGNATURE_FIELD_WORDS.test(lineText)) return 'signature';
   return null;
@@ -586,7 +740,13 @@ const tableFieldHeightForType = (type, cellHeight) => {
   return Math.max(24, Math.min(34, cellHeight));
 };
 
-const chooseTableFieldGeometry = ({ type, line, targetCell, lines, existingFields, pageNumber, metric }) => {
+const tableFieldMinimumWidth = (type) => {
+  if (type === 'signature') return 80;
+  if (type === 'date') return 64;
+  return 36;
+};
+
+const chooseTableFieldGeometry = ({ type, targetCell, metric }) => {
   const pageWidth = finiteNumber(metric.width, 612) || 612;
   const insetX = Math.min(8, Math.max(4, targetCell.width * 0.025));
   const insetY = Math.min(6, Math.max(3, targetCell.height * 0.08));
@@ -598,150 +758,111 @@ const chooseTableFieldGeometry = ({ type, line, targetCell, lines, existingField
   };
   if (inner.width <= 0 || inner.height <= 0) return null;
 
-  const minWidth = type === 'signature' ? 80 : 36;
-  const minHeight = type === 'signature' ? 24 : 18;
+  const minWidth = tableFieldMinimumWidth(type);
+  const minHeight = Math.min(inner.height, type === 'signature' ? 18 : 10);
   const desiredHeight = tableFieldHeightForType(type, inner.height);
-  const lineBox = lineTextBox(line, metric);
-  const textBlockers = textBoxesInCell(lines, targetCell, metric);
-  const fieldBlockers = existingFields
-    .filter((field) => field.page === pageNumber && cellContainsRectCenter(targetCell, field))
-    .map((field) => ({ x: field.x, y: field.y, width: field.width, height: field.height }));
-  const blockers = [...textBlockers, ...fieldBlockers];
-  const candidates = [];
+  const width = Math.min(inner.width, pageWidth - inner.x);
+  const height = Math.min(inner.height, desiredHeight);
+  if (width < minWidth || height < minHeight) return null;
 
-  const pushCandidate = (candidate) => {
-    const x = Math.max(inner.x, candidate.x);
-    const y = Math.max(inner.y, candidate.y);
-    const right = Math.min(inner.x + inner.width, candidate.x + candidate.width);
-    const top = Math.min(inner.y + inner.height, candidate.y + candidate.height);
-    const width = right - x;
-    const height = top - y;
-    if (width < minWidth || height < minHeight) return;
-    const rect = {
-      x,
-      y: y + Math.max(0, (height - Math.min(height, desiredHeight)) / 2),
-      width: Math.min(width, pageWidth - x),
-      height: Math.min(height, desiredHeight),
-    };
-    const overlap = blockers.reduce((max, blocker) => Math.max(max, rectOverlapRatio(rect, blocker)), 0);
-    candidates.push({
-      ...rect,
-      overlap,
-      score: rect.width * rect.height - overlap * 100000,
-    });
-  };
-
-  pushCandidate(inner);
-
-  const rowBlockers = blockers.filter((blocker) =>
-    rangesOverlap(blocker.y, blocker.y + blocker.height, lineBox.y, lineBox.y + lineBox.height) > 0
-  );
-  if (rowBlockers.length) {
-    const rowRight = Math.max(...rowBlockers.map((blocker) => blocker.x + blocker.width));
-    pushCandidate({
-      x: rowRight + 6,
-      y: inner.y,
-      width: inner.x + inner.width - rowRight - 6,
-      height: inner.height,
-    });
-  }
-
-  for (const blocker of blockers) {
-    pushCandidate({
-      x: inner.x,
-      y: inner.y,
-      width: inner.width,
-      height: blocker.y - inner.y - 3,
-    });
-    pushCandidate({
-      x: inner.x,
-      y: blocker.y + blocker.height + 3,
-      width: inner.width,
-      height: inner.y + inner.height - blocker.y - blocker.height - 3,
-    });
-    pushCandidate({
-      x: blocker.x + blocker.width + 6,
-      y: inner.y,
-      width: inner.x + inner.width - blocker.x - blocker.width - 6,
-      height: inner.height,
-    });
-  }
-
-  const cleanCandidates = candidates.filter((candidate) => candidate.overlap <= 0.08);
-  const chosen = cleanCandidates
-    .sort((a, b) => b.score - a.score || b.width - a.width || b.height - a.height)[0];
-
-  if (!chosen) return null;
   return {
-    x: Math.max(0, chosen.x),
-    y: Math.max(0, chosen.y),
-    width: Math.max(minWidth, chosen.width),
-    height: chosen.height,
+    x: Math.max(0, inner.x),
+    y: Math.max(0, inner.y + Math.max(0, (inner.height - height) / 2)),
+    width,
+    height,
   };
+};
+
+const cellsShareRow = (a, b) => {
+  const overlap = rangesOverlap(a.y, a.y + a.height, b.y, b.y + b.height);
+  const minHeight = Math.max(1, Math.min(a.height, b.height));
+  const centerDelta = Math.abs((a.y + a.height / 2) - (b.y + b.height / 2));
+  return overlap / minHeight > 0.7 && centerDelta <= Math.max(6, minHeight * 0.35);
+};
+
+const sameTableCell = (a, b) =>
+  Math.abs(a.x - b.x) <= 3 &&
+  Math.abs(a.y - b.y) <= 3 &&
+  Math.abs(a.width - b.width) <= 6 &&
+  Math.abs(a.height - b.height) <= 6;
+
+const findAdjacentRightCell = (labelCell, tableCells = []) => {
+  const labelRight = labelCell.x + labelCell.width;
+  return tableCells
+    .filter((cell) => {
+      if (sameTableCell(cell, labelCell)) return false;
+      if (!cellsShareRow(cell, labelCell)) return false;
+      const gap = cell.x - labelRight;
+      return gap >= -3 && gap <= 8;
+    })
+    .sort((a, b) =>
+      Math.abs(a.x - labelRight) - Math.abs(b.x - labelRight) ||
+      (a.width * a.height) - (b.width * b.height)
+    )[0] || null;
 };
 
 const tableFieldsFromCells = (lines, pageNumber, metric, tableCells = []) => {
   if (!Array.isArray(tableCells) || !tableCells.length) return [];
-  const pageWidth = finiteNumber(metric.width, 612) || 612;
   const fields = [];
 
   for (const line of lines) {
-    const type = tableFieldTypeForLine(line.text);
-    if (!type) continue;
-
     const bounds = lineBounds(line, metric);
     const labelCells = tableCells
-      .filter((cell) =>
+      .map((cell) => ({
+        cell,
+        labelText: cellTextForLine(line, cell),
+      }))
+      .filter(({ cell, labelText }) =>
+        labelText &&
         line.y >= cell.y - 4 &&
         line.y <= cell.y + cell.height + 4 &&
         rangesOverlap(bounds.x, bounds.right, cell.x, cell.x + cell.width) > 0
       )
-      .sort((a, b) => (a.width * a.height) - (b.width * b.height));
-    const labelCell = labelCells[0];
-    if (!labelCell) continue;
+      .sort((a, b) => a.cell.x - b.cell.x);
 
-    const rowCells = tableCells
-      .filter((cell) => {
-        const overlap = rangesOverlap(labelCell.y, labelCell.y + labelCell.height, cell.y, cell.y + cell.height);
-        return overlap / Math.max(1, Math.min(labelCell.height, cell.height)) > 0.7;
-      })
-      .sort((a, b) => a.x - b.x);
-    const rightCell = rowCells.find((cell) =>
-      cell.x >= labelCell.x + labelCell.width - 3 &&
-      cell.width >= Math.max(90, pageWidth * 0.14) &&
-      !cellHasText(cell, lines, metric)
-    );
-    if (!rightCell) continue;
-    const targetCell = rightCell;
-    const geometry = chooseTableFieldGeometry({
-      type,
-      line,
-      targetCell,
-      lines,
-      existingFields: fields,
-      pageNumber,
-      metric,
-    });
-    if (!geometry) continue;
+    if (!labelCells.length) continue;
 
-    fields.push({
-      source: 'heuristic-keyword',
-      detector: `pdfjs-table-${type}-cell`,
-      type,
-      page: pageNumber,
-      ...geometry,
-      confidence: type === 'signature' ? 0.9 : 0.82,
-      context: line.text.trim(),
-      detection: {
-        lineText: line.text.trim(),
-        tableCell: {
-          x: targetCell.x,
-          y: targetCell.y,
-          width: targetCell.width,
-          height: targetCell.height,
+    // Table rule: only a keyword cell can trigger a field, and only the bordered
+    // cell immediately to its right can receive it.
+    for (const { cell: labelCell, labelText } of labelCells) {
+      if (cellHasBlankMarkerForLine(line, labelCell)) continue;
+      const type = tableFieldTypeForLine(labelText);
+      if (!type) continue;
+
+      const rightCell = findAdjacentRightCell(labelCell, tableCells);
+      const hasEmptyDesignatedCell =
+        rightCell &&
+        rightCell.width - Math.min(8, Math.max(4, rightCell.width * 0.025)) * 2 >= tableFieldMinimumWidth(type) &&
+        !cellHasText(rightCell, lines, metric) &&
+        !cellHasPlacedField(rightCell, fields);
+      if (!hasEmptyDesignatedCell) continue;
+
+      const geometry = chooseTableFieldGeometry({
+        type,
+        targetCell: rightCell,
+        metric,
+      });
+      if (!geometry) continue;
+
+      fields.push({
+        source: 'heuristic-keyword',
+        detector: `pdfjs-table-${type}-cell`,
+        type,
+        page: pageNumber,
+        ...geometry,
+        confidence: type === 'signature' ? 0.9 : 0.82,
+        context: labelText,
+        detection: {
+          lineText: labelText,
+          tableCell: {
+            x: rightCell.x,
+            y: rightCell.y,
+            width: rightCell.width,
+            height: rightCell.height,
+          },
         },
-      },
-    });
+      });
+    }
   }
 
   return fields;
@@ -759,8 +880,9 @@ const lineIntersectsTableCell = (line, tableCells = [], metric = {}) => {
 
 const harmonizeStackedLineFields = (fields, metric) => {
   const pageHeight = finiteNumber(metric.height, 792) || 792;
+  // Include all underline-detected types so signature heights are relative to their neighbours
   const lineFields = fields.filter((field) =>
-    ['date', 'text', 'number'].includes(field.type) &&
+    ['date', 'text', 'number', 'signature', 'initials'].includes(field.type) &&
     String(field.detector || '').startsWith('pdfjs-text-underline')
   );
   const visited = new Set();
@@ -770,12 +892,20 @@ const harmonizeStackedLineFields = (fields, metric) => {
     const stack = lineFields
       .filter((field) => {
         if (visited.has(field)) return false;
-        const overlap = rangesOverlap(seed.x, seed.x + seed.width, field.x, field.x + field.width);
+        const xOverlap = rangesOverlap(seed.x, seed.x + seed.width, field.x, field.x + field.width);
         const minWidth = Math.min(seed.width, field.width) || 1;
-        return overlap / minWidth > 0.35 &&
-          Math.abs(finiteNumber(seed.detection?.underlineY, seed.y + 8) - finiteNumber(field.detection?.underlineY, field.y + 8)) <= 42;
+        // 64 px window catches typical contract signing-block line spacing
+        return xOverlap / minWidth > 0.35 &&
+          Math.abs(
+            finiteNumber(seed.detection?.underlineY, seed.y + 8) -
+            finiteNumber(field.detection?.underlineY, field.y + 8)
+          ) <= 64;
       })
-      .sort((a, b) => finiteNumber(b.detection?.underlineY, b.y + 8) - finiteNumber(a.detection?.underlineY, a.y + 8));
+      // Descending underlineY → stack[0] is highest on page (largest PDF y)
+      .sort((a, b) =>
+        finiteNumber(b.detection?.underlineY, b.y + 8) -
+        finiteNumber(a.detection?.underlineY, a.y + 8)
+      );
 
     if (stack.length < 2) {
       visited.add(seed);
@@ -783,69 +913,228 @@ const harmonizeStackedLineFields = (fields, metric) => {
     }
 
     stack.forEach((field) => visited.add(field));
-    const gaps = stack.slice(1).map((field, index) =>
-      Math.abs(finiteNumber(stack[index].detection?.underlineY, stack[index].y + 8) - finiteNumber(field.detection?.underlineY, field.y + 8))
-    ).filter((gap) => gap > 0);
-    const minGap = gaps.length ? Math.min(...gaps) : 28;
-    const commonHeight = Math.max(14, Math.min(28, minGap - 3));
 
-    for (const field of stack) {
+    // Precompute per-adjacent-pair gaps (index k → gap between k and k+1)
+    const pairGaps = stack.slice(1).map((field, k) =>
+      Math.abs(
+        finiteNumber(stack[k].detection?.underlineY, stack[k].y + 8) -
+        finiteNumber(field.detection?.underlineY, field.y + 8)
+      )
+    ).filter((g) => g > 0);
+    const fallbackGap = pairGaps.length ? Math.min(...pairGaps) : 28;
+
+    for (let k = 0; k < stack.length; k++) {
+      const field = stack[k];
       const underlineY = finiteNumber(field.detection?.underlineY, field.y + 8);
-      field.height = commonHeight;
-      field.y = Math.max(0, Math.min(pageHeight - commonHeight, underlineY - Math.min(8, commonHeight * 0.35)));
-      field.detection = {
-        ...(field.detection || {}),
-        stackedLineHeight: commonHeight,
-      };
+      // Use the gap to the immediately-adjacent field below, not the global minimum.
+      // This lets a signature keep a taller box even when a distant pair is tight.
+      const nextBelow = stack[k + 1];
+      const gapToNext = nextBelow
+        ? Math.abs(underlineY - finiteNumber(nextBelow.detection?.underlineY, nextBelow.y + 8))
+        : fallbackGap;
+
+      const isSig = field.type === 'signature';
+      const isInit = field.type === 'initials';
+      const maxH = isSig ? 40 : isInit ? 28 : 28;
+      // Cap to the adjacent underline gap so tight signing stacks stay visible
+      // without overlapping the next field.
+      const targetHeight = Math.max(8, Math.min(maxH, gapToNext));
+      field.height = targetHeight;
+      field.y = Math.max(0, Math.min(pageHeight - targetHeight, underlineY));
+      field.detection = { ...(field.detection || {}), stackedLineHeight: targetHeight };
     }
   }
 
   return fields;
 };
 
+// Resolve any remaining overlaps after mergeFields/normalizePdfField.
+// All fields are in PDF coordinates: y=0 at bottom, y increases upward.
+// Higher PDF y = higher on page (appears earlier when reading).
+const resolveFieldOverlaps = (fields) => {
+  const byPage = new Map();
+  for (const field of fields) {
+    const p = field.page || 1;
+    if (!byPage.has(p)) byPage.set(p, []);
+    byPage.get(p).push(field);
+  }
+
+  for (const pageFields of byPage.values()) {
+    // Sort by PDF y descending → fields higher on the page come first.
+    // Ties broken by height descending so a taller field is "upper" and protects
+    // the shorter one from being spuriously clipped.
+    pageFields.sort((a, b) => b.y - a.y || b.height - a.height);
+
+    // N² pass so non-consecutive pairs (A overlaps C but not B) are also caught.
+    for (let i = 0; i < pageFields.length; i++) {
+      const upper = pageFields[i];
+      for (let j = i + 1; j < pageFields.length; j++) {
+        const lower = pageFields[j];
+
+        // After sort upper.y >= lower.y always holds.
+        // If the difference is < 4 px the two fields are on the same visual row
+        // (e.g. signature left / date right) — skip to avoid false clips.
+        if (upper.y - lower.y < 4) continue;
+
+        // Skip when the fields don't share enough horizontal space to be considered
+        // part of the same column.  25 % overlap of the narrower field is the threshold.
+        const xOverlap = rangesOverlap(
+          upper.x, upper.x + upper.width,
+          lower.x, lower.x + lower.width
+        );
+        const minWidth = Math.min(upper.width, lower.width) || 1;
+        if (xOverlap / minWidth < 0.25) continue;
+
+        // In PDF space: lower field occupies [lower.y, lower.y + lower.height].
+        // It overlaps upper field when lower.y + lower.height > upper.y.
+        const lowerTop = lower.y + lower.height;
+        if (lowerTop > upper.y) {
+          const available = upper.y - lower.y - 2; // 2 px breathing room
+          // 8 px absolute floor — type-specific minH must not force the box
+          // above the available space and re-introduce the overlap.
+          lower.height = Math.max(8, available);
+        }
+      }
+    }
+  }
+
+  return fields;
+};
+
+// Returns the PDF y of the nearest text line or drawn rule that sits above the field's
+// underline (within 80 px, with ≥15 % x overlap). Returns null if nothing is found.
+// In PDF space "above" means higher y (y increases upward).
+const findNearestContentAbove = (field, lines, drawnLines) => {
+  const underlineY = finiteNumber(field.detection?.underlineY, field.y);
+  const fieldLeft = field.x;
+  const fieldRight = field.x + field.width;
+  const fieldWidth = field.width || 1;
+  let nearest = null;
+
+  for (const line of lines) {
+    if (line.y <= underlineY + 2) continue;
+    if (line.y > underlineY + 80) continue;
+    const xOverlap = rangesOverlap(fieldLeft, fieldRight, line.x, line.right || line.x);
+    if (xOverlap / fieldWidth < 0.15) continue;
+    if (nearest === null || line.y < nearest) nearest = line.y;
+  }
+
+  for (const dl of drawnLines) {
+    if (dl.y <= underlineY + 2) continue;
+    if (dl.y > underlineY + 80) continue;
+    const xOverlap = rangesOverlap(fieldLeft, fieldRight, dl.x, dl.x + dl.width);
+    if (xOverlap / fieldWidth < 0.15) continue;
+    if (nearest === null || dl.y < nearest) nearest = dl.y;
+  }
+
+  return nearest;
+};
+
+const clampFieldsToTableCells = (fields, tableCells = []) => {
+  if (!Array.isArray(tableCells) || !tableCells.length) return fields;
+
+  for (const field of fields) {
+    if (!String(field.detector || '').startsWith('pdfjs-text-underline') &&
+      !String(field.detector || '').startsWith('pdfjs-table-')) {
+      continue;
+    }
+
+    const anchorX = field.x + Math.min(8, Math.max(1, field.width / 2));
+    const anchorY = field.y + Math.max(1, field.height / 2);
+    const cell = tableCells.find((candidate) => cellContainsPoint(candidate, anchorX, anchorY)) ||
+      tableCells.find((candidate) => cellContainsRectCenter(candidate, field));
+    if (!cell) continue;
+
+    const inset = 2;
+    const left = cell.x + inset;
+    const right = cell.x + cell.width - inset;
+    const bottom = cell.y + inset;
+    const top = cell.y + cell.height - inset;
+    if (right <= left || top <= bottom) continue;
+
+    const minWidth = Math.min(field.type === 'checkbox' ? 12 : 24, right - left);
+    const minHeight = Math.min(field.type === 'signature' ? 18 : 12, top - bottom);
+
+    const nextX = Math.max(left, Math.min(field.x, right - minWidth));
+    const nextRight = Math.max(nextX + minWidth, Math.min(right, field.x + field.width));
+    const nextY = Math.max(bottom, Math.min(field.y, top - minHeight));
+    const nextTop = Math.max(nextY + minHeight, Math.min(top, field.y + field.height));
+
+    field.x = nextX;
+    field.y = nextY;
+    field.width = nextRight - nextX;
+    field.height = nextTop - nextY;
+    field.detection = {
+      ...(field.detection || {}),
+      clampedToTableCell: { x: cell.x, y: cell.y, width: cell.width, height: cell.height },
+    };
+  }
+
+  return fields;
+};
+
 const textLayoutFieldsFromLines = (lines, pageNumber, metric, signers = [], drawnLines = [], tableCells = []) => {
+  void signers;
   const fields = [];
 
-  fields.push(...tableFieldsFromCells(lines, pageNumber, metric, tableCells));
+  fields.push(...tableFieldsFromCells(lines, pageNumber, metric, tableCells, drawnLines));
 
   lines.forEach((line, index) => {
-    if (tableFieldTypeForLine(line.text) && lineIntersectsTableCell(line, tableCells, metric)) return;
-
     const neighborText = [
       lines[index - 1]?.text || '',
       lines[index + 1]?.text || '',
     ].join(' ');
     const runs = lineRunsNearText(line, drawnLines);
+    // Once table geometry exists, table rows are handled exclusively by
+    // tableFieldsFromCells. Letting generic underline detection run inside a
+    // table causes fields to land on labels/prose when a compact row is missed.
+    if (lineIntersectsTableCell(line, tableCells, metric)) return;
 
-    const dateField = dateFieldFromLine(line, pageNumber, metric, runs);
+    // "Dated at ___ on this ___ day of ___ 20___" — one field per blank.
+    // These are legal date fragments, so they are text/number fields rather than
+    // separate full date-picker controls.
+    const isInlineDateClause = INLINE_DATE_CLAUSE_RE.test(line.text);
+    const clauseFields = isInlineDateClause
+      ? inlineDateClauseFieldsFromLine(line, pageNumber, metric, runs)
+      : [];
+    clauseFields.forEach((f) => fields.push(f));
+
+    const dateField = isInlineDateClause ? null : dateFieldFromLine(line, pageNumber, metric, runs);
     if (dateField) fields.push(dateField);
 
-    const textField = textFieldFromLine(line, pageNumber, metric, runs);
+    const textField = isInlineDateClause ? null : textFieldFromLine(line, pageNumber, metric, runs);
     if (textField) fields.push(textField);
 
-    fields.push(...legalDateValueFieldsFromLine(line, pageNumber, metric, runs));
+    // "Signed at ___" → text (place); "Signed on ___" → date.
+    // Neither is a signature field. EXECUTION_PLACE_WORDS already zeroes signature
+    // confidence for these lines, but nothing was creating a field for them.
+    const signedField = (!isInlineDateClause && !dateField && !textField)
+      ? signedAtOrOnFieldFromLine(line, pageNumber, metric, runs)
+      : null;
+    if (signedField) fields.push(signedField);
 
     const signatureConfidence = signatureConfidenceForContext(line.text, neighborText);
     if (!signatureConfidence) return;
 
+    // All non-signature fields already detected on this line — used to guard against
+    // a run being claimed as both a clause blank and a signature field.
+    const lineNonSigFields = [
+      ...clauseFields,
+      ...(dateField ? [dateField] : []),
+      ...(textField ? [textField] : []),
+      ...(signedField ? [signedField] : []),
+    ];
+
     const signatureCueIndex = line.text.search(SIGNATURE_LINE_WORDS);
     for (const run of runs) {
-      if (dateField && overlapRatio(dateField, {
-        type: dateField.type,
+      const runBox = {
         page: pageNumber,
         x: run.x,
         y: Math.max(0, run.y - 8),
         width: run.width,
-        height: dateField.height,
-      }) > 0.25) continue;
-      if (textField && overlapRatio(textField, {
-        type: textField.type,
-        page: pageNumber,
-        x: run.x,
-        y: Math.max(0, run.y - 8),
-        width: run.width,
-        height: textField.height,
-      }) > 0.25) continue;
+        height: 28,
+      };
+      if (lineNonSigFields.some((f) => overlapRatio(f, runBox) > 0.25)) continue;
       if (signatureCueIndex >= 0 && run.textEnd <= signatureCueIndex) continue;
       if (run.width < Math.min(110, finiteNumber(metric.width, 612) * 0.18)) continue;
       fields.push(fieldFromUnderlineRun({
@@ -861,30 +1150,22 @@ const textLayoutFieldsFromLines = (lines, pageNumber, metric, signers = [], draw
   });
 
   const laidOutFields = harmonizeStackedLineFields(fields, metric);
-  const signerCount = Array.isArray(signers) ? signers.length : 0;
-  if (!signerCount) return laidOutFields;
 
-  const capped = [];
-  for (const type of ['signature', 'date']) {
-    const typeFields = laidOutFields
-      .filter((field) => field.type === type)
-      .sort((a, b) => b.confidence - a.confidence || a.page - b.page || b.y - a.y || a.x - b.x)
-      .slice(0, signerCount)
-      .map((field, signerIndex) => ({
-        ...field,
-        signerIndex,
-        detection: {
-          ...(field.detection || {}),
-          signerIndex,
-        },
-      }));
-    capped.push(...typeFields);
+  // Snap every underline-detected field to its underline y and clamp its height
+  // against any text or rule that sits directly above it on the page.
+  for (const field of laidOutFields) {
+    if (!String(field.detector || '').startsWith('pdfjs-text-underline')) continue;
+    const underlineY = finiteNumber(field.detection?.underlineY, field.y);
+    field.y = Math.max(0, underlineY);
+    const aboveY = findNearestContentAbove(field, lines, drawnLines);
+    if (aboveY !== null) {
+      // Hard cap: never extend above content. 8 px absolute minimum keeps the
+      // field visible; minH by type is NOT applied here so the cap always wins.
+      field.height = Math.max(8, Math.min(field.height, aboveY - underlineY - 2));
+    }
   }
 
-  return [
-    ...capped,
-    ...laidOutFields.filter((field) => !['signature', 'date'].includes(field.type)),
-  ];
+  return clampFieldsToTableCells(laidOutFields, tableCells);
 };
 
 const multiplyPdfMatrices = (left, right) => [
@@ -933,29 +1214,37 @@ const buildTableCellsFromGridLines = (horizontalLines, verticalLines, metric) =>
     const bottom = yCoords[yIndex];
     const top = yCoords[yIndex + 1];
     const height = top - bottom;
-    if (height < 24 || height > pageHeight * 0.35) continue;
+    if (height < 14 || height > pageHeight * 0.35) continue;
 
-    for (let xIndex = 0; xIndex < xCoords.length - 1; xIndex += 1) {
-      const left = xCoords[xIndex];
-      const right = xCoords[xIndex + 1];
-      const width = right - left;
-      if (width < Math.max(70, pageWidth * 0.1)) continue;
+    for (let leftIndex = 0; leftIndex < xCoords.length - 1; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < xCoords.length; rightIndex += 1) {
+        const left = xCoords[leftIndex];
+        const right = xCoords[rightIndex];
+        const width = right - left;
+        if (width < Math.max(70, pageWidth * 0.1)) continue;
 
-      const hasTop = horizontalLines.some((line) =>
-        Math.abs(line.y - top) <= 3 && line.x <= left + 4 && line.x + line.width >= right - 4
-      );
-      const hasBottom = horizontalLines.some((line) =>
-        Math.abs(line.y - bottom) <= 3 && line.x <= left + 4 && line.x + line.width >= right - 4
-      );
-      const hasLeft = verticalLines.some((line) =>
-        Math.abs(line.x - left) <= 3 && line.y <= bottom + 4 && line.y + line.height >= top - 4
-      );
-      const hasRight = verticalLines.some((line) =>
-        Math.abs(line.x - right) <= 3 && line.y <= bottom + 4 && line.y + line.height >= top - 4
-      );
+        const hasTop = horizontalLines.some((line) =>
+          Math.abs(line.y - top) <= 3 && line.x <= left + 4 && line.x + line.width >= right - 4
+        );
+        const hasBottom = horizontalLines.some((line) =>
+          Math.abs(line.y - bottom) <= 3 && line.x <= left + 4 && line.x + line.width >= right - 4
+        );
+        const hasLeft = verticalLines.some((line) =>
+          Math.abs(line.x - left) <= 3 && line.y <= bottom + 4 && line.y + line.height >= top - 4
+        );
+        const hasRight = verticalLines.some((line) =>
+          Math.abs(line.x - right) <= 3 && line.y <= bottom + 4 && line.y + line.height >= top - 4
+        );
+        const hasInteriorDivider = verticalLines.some((line) =>
+          line.x > left + 4 &&
+          line.x < right - 4 &&
+          line.y <= bottom + 4 &&
+          line.y + line.height >= top - 4
+        );
 
-      if (hasTop && hasBottom && hasLeft && hasRight) {
-        cells.push({ source: 'pdf-path-table-grid', x: left, y: bottom, width, height });
+        if (hasTop && hasBottom && hasLeft && hasRight && !hasInteriorDivider) {
+          cells.push({ source: 'pdf-path-table-grid', x: left, y: bottom, width, height });
+        }
       }
     }
   }
@@ -1228,6 +1517,7 @@ const normalizePdfField = (field, pageMetrics) => {
     role: field.role || '',
     required: field.required !== false,
     filled: false,
+    fieldMeta: field.fieldMeta,
     source: field.source || 'heuristic-default',
     confidence: Number.isFinite(Number(field.confidence)) ? Number(field.confidence) : 0.5,
     anchor: field.anchor || '',
@@ -1264,6 +1554,21 @@ const centerDistance = (a, b) => {
   return Math.hypot(ax - bx, ay - by);
 };
 
+const looksLikeSameFieldPosition = (a, b) => {
+  if (a.page !== b.page) return false;
+  const ax = a.x + a.width / 2;
+  const ay = a.y + a.height / 2;
+  const bx = b.x + b.width / 2;
+  const by = b.y + b.height / 2;
+  const xDelta = Math.abs(ax - bx);
+  const yDelta = Math.abs(ay - by);
+  const widthDelta = Math.abs(a.width - b.width);
+  return centerDistance(a, b) < 28 &&
+    xDelta <= Math.max(8, Math.min(a.width, b.width) * 0.08) &&
+    yDelta <= Math.max(6, Math.min(a.height, b.height) * 0.35) &&
+    widthDelta <= Math.max(16, Math.max(a.width, b.width) * 0.15);
+};
+
 const mergeFields = (fields, pageMetrics) => {
   const normalized = fields
     .map((field) => normalizePdfField(field, pageMetrics))
@@ -1273,7 +1578,7 @@ const mergeFields = (fields, pageMetrics) => {
   for (const field of normalized) {
     const duplicate = merged.find((item) =>
       item.type === field.type &&
-      (overlapRatio(item, field) > 0.35 || centerDistance(item, field) < 28)
+      (overlapRatio(item, field) > 0.35 || looksLikeSameFieldPosition(item, field))
     );
     if (!duplicate) merged.push(field);
   }
@@ -1286,19 +1591,302 @@ const mergeFields = (fields, pageMetrics) => {
     }));
 };
 
+// Scans text lines across all pages for "FOR:", "SIGNED BY:", "EXECUTED BY:" etc. headers
+// that mark where each party's signing block begins. Returns signer block boundaries.
+// pageLines: Array<{ pageNumber, lines }> where lines are sorted descending y (top-of-page first).
+const inferSignerBlocksFromLines = (pageLines, signers) => {
+  const signerList = Array.isArray(signers) ? signers : [];
+  const rawBlocks = [];
+
+  for (const { pageNumber, lines } of pageLines) {
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].text.trim();
+      if (!EXEC_BLOCK_HEADER_RE.test(trimmed)) continue;
+
+      // Extract entity label: text after the colon, or the next non-field line if blank
+      const afterColon = trimmed.replace(EXEC_BLOCK_HEADER_RE, '').trim();
+      let label = afterColon;
+      if (!label && lines[i + 1]) {
+        const nextText = lines[i + 1].text.trim();
+        if (!FIELD_LINE_RE.test(nextText) && !EXEC_BLOCK_HEADER_RE.test(nextText)) {
+          label = nextText;
+        }
+      }
+
+      rawBlocks.push({ pageNumber, y: lines[i].y, x: lines[i].x || 0, rawLabel: label });
+    }
+  }
+
+  // Need at least 2 blocks to trigger spatial assignment
+  if (rawBlocks.length < 2) return { signerBlocks: [], hasBlocks: false };
+
+  // Sort top-to-bottom: ascending page, descending y within page
+  rawBlocks.sort((a, b) => a.pageNumber - b.pageNumber || b.y - a.y);
+
+  // Match blocks to signers: try name/role substring match first, fall back to order
+  const normalize = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const assignedSigners = new Set();
+
+  const signerBlocks = rawBlocks.map((block) => {
+    const labelNorm = normalize(block.rawLabel);
+    let bestIndex = -1;
+    let bestScore = 0;
+
+    for (let si = 0; si < signerList.length; si++) {
+      if (assignedSigners.has(si)) continue;
+      const nameNorm = normalize(signerList[si]?.name);
+      const roleNorm = normalize(signerList[si]?.role);
+      let score = 0;
+      if (labelNorm && nameNorm && labelNorm.includes(nameNorm) && nameNorm.length > 2) score = 2;
+      else if (labelNorm && roleNorm && labelNorm.includes(roleNorm) && roleNorm.length > 2) score = 1;
+      if (score > bestScore) { bestScore = score; bestIndex = si; }
+    }
+
+    // Fall back to next unassigned signer in order
+    if (bestIndex < 0) {
+      for (let si = 0; si < Math.max(signerList.length, rawBlocks.length); si++) {
+        if (!assignedSigners.has(si)) { bestIndex = si; break; }
+      }
+    }
+
+    if (bestIndex >= 0) assignedSigners.add(bestIndex);
+    return { pageNumber: block.pageNumber, y: block.y, x: block.x || 0, signerIndex: bestIndex >= 0 ? bestIndex : 0 };
+  });
+
+  return { signerBlocks, hasBlocks: true };
+};
+
+// Tags each field with the signerIndex of the nearest "FOR:" block above it.
+// Fields with detection.signerIndex already set (e.g. from anchors) are left unchanged.
+const assignFieldsBySignerBlocks = (fields, signerBlocks) => {
+  if (!signerBlocks.length) return fields;
+
+  return fields.map((field) => {
+    if (Number.isInteger(field.detection?.signerIndex)) return field;
+
+    const fieldPage = field.page || 1;
+    const fieldY = finiteNumber(field.y);
+
+    // Blocks on the same page whose header sits above this field (larger PDF y)
+    // Allow 4 px slack so a field whose baseline touches the FOR: line still matches
+    const aboveSamePage = signerBlocks.filter(
+      (b) => b.pageNumber === fieldPage && b.y > fieldY - 4
+    );
+
+    if (aboveSamePage.length > 0) {
+      // Primary sort: smallest vertical distance above field (closest header wins).
+      // Tiebreaker for same-y blocks (side-by-side columns): smallest horizontal
+      // distance from the block header's left edge to the field's centre.
+      const fieldCenterX = finiteNumber(field.x) + finiteNumber(field.width) / 2;
+      const nearest = aboveSamePage.reduce((best, b) => {
+        const bDy = b.y - fieldY;
+        const bestDy = best.y - fieldY;
+        if (Math.abs(bDy - bestDy) > 20) return bDy < bestDy ? b : best;
+        const bDx = Math.abs((b.x || 0) - fieldCenterX);
+        const bestDx = Math.abs((best.x || 0) - fieldCenterX);
+        return bDx < bestDx ? b : best;
+      });
+      return {
+        ...field,
+        detection: {
+          ...(field.detection || {}),
+          signerIndex: nearest.signerIndex,
+          signerAssignmentSource: 'signer-block',
+        },
+      };
+    }
+
+    // Field is above all blocks on its page, or its block started on a previous page
+    const prevPageBlock = signerBlocks
+      .filter((b) => b.pageNumber < fieldPage)
+      .sort((a, b) => b.pageNumber - a.pageNumber || b.y - a.y)[0];
+
+    if (prevPageBlock) {
+      return {
+        ...field,
+        detection: {
+          ...(field.detection || {}),
+          signerIndex: prevPageBlock.signerIndex,
+          signerAssignmentSource: 'signer-block',
+        },
+      };
+    }
+
+    return field;
+  });
+};
+
+const fieldReadOrder = (a, b) =>
+  a.page - b.page || b.y - a.y || a.x - b.x;
+
+const fieldKey = (field) =>
+  field.id || `${field.type}:${field.page}:${Math.round(field.x)}:${Math.round(field.y)}:${Math.round(field.width)}`;
+
+const explicitSignerIndex = (field) => {
+  if (Number.isInteger(field.signerIndex)) return field.signerIndex;
+  if (
+    Number.isInteger(field.detection?.signerIndex) &&
+    field.detection?.signerAssignmentSource !== 'signer-block'
+  ) {
+    return field.detection.signerIndex;
+  }
+  return parseSignerIndex(field.name || field.anchor || field.context || '');
+};
+
+const softSignerBlockIndex = (field) => {
+  if (
+    Number.isInteger(field.detection?.signerIndex) &&
+    field.detection?.signerAssignmentSource === 'signer-block'
+  ) {
+    return field.detection.signerIndex;
+  }
+  return null;
+};
+
+const nearestSignatureAnchor = (field, anchors = []) => {
+  if (!anchors.length || field.type === 'signature') return null;
+  const fieldCenterX = finiteNumber(field.x) + finiteNumber(field.width) / 2;
+  const fieldCenterY = finiteNumber(field.y) + finiteNumber(field.height) / 2;
+  const fieldWidth = Math.max(1, finiteNumber(field.width, 1));
+  const isClauseFragment = Boolean(field.detection?.clauseLineId || field.detection?.isInlineDateClause);
+  let best = null;
+
+  for (const anchor of anchors) {
+    const signature = anchor.field;
+    if ((signature.page || 1) !== (field.page || 1)) continue;
+
+    const sigCenterX = finiteNumber(signature.x) + finiteNumber(signature.width) / 2;
+    const sigCenterY = finiteNumber(signature.y) + finiteNumber(signature.height) / 2;
+    const dy = Math.abs(sigCenterY - fieldCenterY);
+    const signatureBelow = sigCenterY < fieldCenterY;
+    const signatureAbove = sigCenterY > fieldCenterY;
+    const maxDy = isClauseFragment ? 260 : field.type === 'date' ? 130 : 150;
+    if (dy > maxDy) continue;
+
+    const xOverlap = rangesOverlap(
+      field.x, field.x + field.width,
+      signature.x, signature.x + signature.width
+    );
+    const overlapRatioX = xOverlap / Math.min(fieldWidth, Math.max(1, finiteNumber(signature.width, 1)));
+    const dx = Math.abs(sigCenterX - fieldCenterX);
+    const closeEnoughX = isClauseFragment
+      ? overlapRatioX >= 0.05 || dx <= Math.max(320, finiteNumber(signature.width, 1))
+      : overlapRatioX >= 0.1 || dx <= Math.max(180, finiteNumber(signature.width, 1) * 0.75);
+    if (!closeEnoughX) continue;
+
+    let score = dy * 2 + dx * 0.15 - overlapRatioX * 80;
+    if (isClauseFragment) score += signatureBelow ? -220 : 220;
+    else if (field.type === 'date' && dy <= 36) score -= 80;
+    else if (signatureAbove && dy <= 120) score -= 40;
+
+    if (!best || score < best.score) best = { ...anchor, score };
+  }
+
+  return best;
+};
+
+const SIGNING_GROUP_START_RE = /^\s*(?:signed\s+(?:at|on)|dated\s+at)\b/i;
+
+const startsSequentialSigningGroup = (field) => {
+  if (!['text', 'date', 'number'].includes(field.type)) return false;
+  const context = String(field.context || field.detection?.lineText || '').trim();
+  if (!SIGNING_GROUP_START_RE.test(context)) return false;
+  if (field.detection?.isInlineDateClause) {
+    return !field.detection.fragmentRole || field.detection.fragmentRole === 'execution-place';
+  }
+  return true;
+};
+
+const sequentialSigningGroupAssignments = (orderedFields, signerCount) => {
+  const assignments = new Map();
+  let currentGroup = null;
+  let groupIndex = -1;
+
+  for (const field of orderedFields) {
+    if (startsSequentialSigningGroup(field)) {
+      groupIndex += 1;
+      currentGroup = {
+        page: field.page || 1,
+        signerIndex: groupIndex % signerCount,
+      };
+    }
+
+    if (!currentGroup || (field.page || 1) !== currentGroup.page) continue;
+    assignments.set(fieldKey(field), currentGroup.signerIndex);
+  }
+
+  return assignments;
+};
+
 const assignFieldsToSigners = (fields, signers = []) => {
   const signerList = Array.isArray(signers) ? signers : [];
-  return fields.map((field, index) => {
-    const signerIndex = Number.isInteger(field.detection?.signerIndex)
-      ? field.detection.signerIndex
-      : field.type === 'signature' || field.type === 'date' || field.type === 'initials'
-        ? index % Math.max(1, signerList.length)
-        : -1;
-    const signer = signerIndex >= 0 ? signerList[signerIndex] : null;
+  const signerCount = Math.max(1, signerList.length);
+  const ordered = [...fields].sort(fieldReadOrder);
+  const groupSignerByKey = sequentialSigningGroupAssignments(ordered, signerCount);
+  const signatureSignerByKey = new Map();
+  let nextSignatureSigner = 0;
+
+  for (const field of ordered) {
+    if (field.type !== 'signature') continue;
+    const explicit = explicitSignerIndex(field);
+    const signerIndex = Number.isInteger(explicit)
+      ? explicit
+      : nextSignatureSigner % signerCount;
+    signatureSignerByKey.set(fieldKey(field), signerIndex);
+    nextSignatureSigner = Math.max(nextSignatureSigner + (Number.isInteger(explicit) ? 0 : 1), signerIndex + 1);
+  }
+
+  const anchors = ordered
+    .filter((field) => field.type === 'signature')
+    .map((field) => ({ field, signerIndex: signatureSignerByKey.get(fieldKey(field)) ?? 0 }));
+
+  const fallbackSignerByClause = new Map();
+  let fallbackCounter = 0;
+
+  return fields.map((field) => {
+    let signerIndex = explicitSignerIndex(field);
+
+    if (!Number.isInteger(signerIndex) && field.type === 'signature') {
+      signerIndex = signatureSignerByKey.get(fieldKey(field)) ?? 0;
+    }
+
+    if (!Number.isInteger(signerIndex)) {
+      const anchor = nearestSignatureAnchor(field, anchors);
+      if (anchor) signerIndex = anchor.signerIndex;
+    }
+
+    if (!Number.isInteger(signerIndex)) {
+      signerIndex = groupSignerByKey.get(fieldKey(field));
+    }
+
+    if (!Number.isInteger(signerIndex)) {
+      signerIndex = softSignerBlockIndex(field);
+    }
+
+    if (!Number.isInteger(signerIndex)) {
+      const clauseId = field.detection?.clauseLineId;
+      if (clauseId) {
+        if (!fallbackSignerByClause.has(clauseId)) {
+          fallbackSignerByClause.set(clauseId, fallbackCounter % signerCount);
+        }
+        signerIndex = fallbackSignerByClause.get(clauseId);
+      } else if (field.type === 'date' || field.type === 'initials') {
+        signerIndex = fallbackCounter % signerCount;
+        fallbackCounter += 1;
+      } else {
+        signerIndex = Math.max(0, Math.min(signerCount - 1, fallbackCounter));
+      }
+    }
+
+    const signer = signerIndex >= 0 ? signerList[signerIndex % signerCount] : null;
     return {
       ...field,
       assignedTo: field.assignedTo || signer?.email || '',
       role: field.role || signer?.role || '',
+      detection: {
+        ...(field.detection || {}),
+        signerIndex,
+      },
     };
   });
 };
@@ -1379,6 +1967,7 @@ const detectLayoutFieldsWithPdfJs = async (pdfPath, pageMetrics, signers = []) =
   const loadingTask = pdfjsLib.getDocument({ data, disableWorker: true });
   const pdf = await loadingTask.promise;
   let fields = [];
+  const pageLines = [];
 
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber);
@@ -1386,6 +1975,7 @@ const detectLayoutFieldsWithPdfJs = async (pdfPath, pageMetrics, signers = []) =
     const operatorList = await page.getOperatorList();
     const metric = pageMetrics[pageNumber - 1] || page.getViewport({ scale: 1 });
     const lines = buildTextLines(text.items || []);
+    pageLines.push({ pageNumber, lines });
     const pathGeometry = pathGeometryFromOperatorList(operatorList, metric, pdfjsLib.OPS || {});
     fields = fields.concat(textLayoutFieldsFromLines(
       lines,
@@ -1395,6 +1985,15 @@ const detectLayoutFieldsWithPdfJs = async (pdfPath, pageMetrics, signers = []) =
       pathGeometry.horizontalLines,
       pathGeometry.tableCells
     ));
+  }
+
+  // Detect "FOR:" / "SIGNED BY:" execution blocks and reassign fields spatially.
+  // When blocks are found, each field is tagged with the signerIndex of the block
+  // it falls under, overriding the sequential round-robin in textLayoutFieldsFromLines.
+  const { signerBlocks, hasBlocks } = inferSignerBlocksFromLines(pageLines, signers);
+  if (hasBlocks) {
+    fields = assignFieldsBySignerBlocks(fields, signerBlocks);
+    diagnostics.signerBlocksDetected = signerBlocks.length;
   }
 
   const initialFields = buildMiddlePageInitialFields(pageMetrics, signers);
@@ -1651,7 +2250,13 @@ const prepareSigningDocument = async ({ doc, signers = [], strategy = {} }) => {
   ];
 
   const hasSignatureField = candidates.some((field) => field.type === 'signature');
-  const hasDateField = candidates.some((field) => field.type === 'date');
+  const hasDateField = candidates.some((field) =>
+    field.type === 'date' ||
+    (
+      field.detection?.isInlineDateClause &&
+      ['day', 'month', 'year'].includes(field.detection?.fragmentRole)
+    )
+  );
   if (!hasSignatureField || !hasDateField) {
     const defaultFields = buildDefaultFields(pageMetrics, signers)
       .filter((field) =>
@@ -1667,7 +2272,10 @@ const prepareSigningDocument = async ({ doc, signers = [], strategy = {} }) => {
     });
   }
 
-  const fields = assignFieldsToSigners(mergeFields(candidates, pageMetrics), signers);
+  const fields = assignFieldsToSigners(
+    resolveFieldOverlaps(mergeFields(candidates, pageMetrics)),
+    signers,
+  );
   const reviewRequired = fields.some((field) => field.confidence < 0.75 || field.source === 'heuristic-default');
   const fieldsHash = crypto.createHash('sha256').update(JSON.stringify(fields)).digest('hex');
 
@@ -1706,6 +2314,7 @@ module.exports = {
   detectLayoutFieldsWithPdfJs,
   getPdfPageMetrics,
   mergeFields,
+  assignFieldsToSigners,
   buildMiddlePageInitialFields,
   textLayoutFieldsFromLines,
   pathGeometryFromOperatorList,

@@ -5,13 +5,13 @@ export const VALUE_FIELD_TYPES = new Set(['date', 'text', 'number', 'checkbox', 
 
 export const FIELD_TYPES = [
   { type: 'signature', label: 'Signature', icon: 'Sig', width: 0.28, height: 0.064, required: true, desc: 'Full signature field' },
-  { type: 'initials', label: 'Initials', icon: 'Aa', width: 0.12, height: 0.038, required: false, desc: 'Initials acknowledgement' },
-  { type: 'date', label: 'Date', icon: 'Date', width: 0.18, height: 0.034, required: false, desc: 'Signing date field' },
-  { type: 'text', label: 'Text', icon: 'T', width: 0.24, height: 0.036, required: false, desc: 'Free text field' },
-  { type: 'number', label: 'Number', icon: '123', width: 0.16, height: 0.036, required: false, desc: 'Numeric field' },
-  { type: 'checkbox', label: 'Checkbox', icon: 'Check', width: 0.034, height: 0.034, required: false, desc: 'Checkbox acknowledgement' },
-  { type: 'radio', label: 'Radio', icon: 'Radio', width: 0.034, height: 0.034, required: false, desc: 'Single-choice option' },
-  { type: 'dropdown', label: 'Dropdown', icon: 'List', width: 0.22, height: 0.036, required: false, desc: 'Dropdown choice field' },
+  { type: 'initials', label: 'Initials', icon: 'Aa', width: 0.12, height: 0.038, required: true, desc: 'Initials acknowledgement' },
+  { type: 'date', label: 'Date', icon: 'Date', width: 0.18, height: 0.034, required: true, desc: 'Signing date field' },
+  { type: 'text', label: 'Text', icon: 'T', width: 0.24, height: 0.036, required: true, desc: 'Free text field' },
+  { type: 'number', label: 'Number', icon: '123', width: 0.16, height: 0.036, required: true, desc: 'Numeric field' },
+  { type: 'checkbox', label: 'Checkbox', icon: 'Check', width: 0.034, height: 0.034, required: true, desc: 'Checkbox acknowledgement' },
+  { type: 'radio', label: 'Radio', icon: 'Radio', width: 0.034, height: 0.034, required: true, desc: 'Single-choice option' },
+  { type: 'dropdown', label: 'Dropdown', icon: 'List', width: 0.22, height: 0.036, required: true, desc: 'Dropdown choice field' },
 ];
 
 const byType = new Map(FIELD_TYPES.map((item) => [item.type, item]));
@@ -89,6 +89,7 @@ export const normalizeFieldForStorage = (field, pageMetrics) => {
     ...field,
     ...geometry,
     page,
+    required: true,
     coordinateOrigin: 'normalized',
   };
 };
@@ -118,7 +119,7 @@ export const createField = ({ type, signer, page = 1, x = 0.5, y = 0.45 }) => {
     coordinateOrigin: 'normalized',
     assignedTo: signer?.email || '',
     role: signer?.role || '',
-    required: cfg.required,
+    required: true,
     filled: false,
     source: 'manual',
     confidence: 1,

@@ -17,6 +17,7 @@ const STATUS_BADGE = {
 const isMongoId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
 const isReadyForEnvelope = (doc) =>
   ['Ready for Signature', 'Approved', 'Draft'].includes(doc?.status);
+const envelopeRoute = (docId, mode) => `/signing/envelope/${docId}?mode=${mode}`;
 
 const SIGNER_STATUS_META = {
   signed:     { cls: 'sd-signer-chip--signed',   icon: '✅', label: 'Signed' },
@@ -115,7 +116,8 @@ export default function SigningDashboard() {
     const total = doc.signingFields?.length || 0;
     const filled = doc.signingFields?.filter((f) => f.filled).length || 0;
     const hasSingerList = Array.isArray(doc.signers) && doc.signers.length > 0;
-    const openRoute = showPrepareBtn ? `/signing/envelope/${doc._id}` : `/signing/view/${doc._id}`;
+    const openRoute = `/signing/view/${doc._id}`;
+    const prepareRoute = envelopeRoute(doc._id, 'prepare');
     const serverBacked = isMongoId(doc._id);
 
     return (
@@ -192,14 +194,14 @@ export default function SigningDashboard() {
             className="sd-btn sd-btn--view"
             onClick={() => navigate(openRoute)}
           >
-            {showPrepareBtn ? 'Open Envelope' : 'Open Signing Room'}
+            {showPrepareBtn ? 'View Document' : 'Open Signing Room'}
           </button>
           {showPrepareBtn && (
             <button
               className="sd-btn sd-btn--send"
-              onClick={() => navigate(`/signing/envelope/${doc._id}`)}
+              onClick={() => navigate(prepareRoute)}
             >
-              {serverBacked ? 'Detect Fields' : 'Upload & Detect'}
+              Upload For Signature
             </button>
           )}
           {showSignBtn && doc.status !== 'Signed' && (

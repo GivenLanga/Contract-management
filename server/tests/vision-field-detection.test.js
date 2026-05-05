@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const { visionPercentToPdfField } = require('../src/services/visionFieldDetectionService');
 const {
+  assignFieldsToSigners,
   buildMiddlePageInitialFields,
   mergeFields,
   pathGeometryFromOperatorList,
@@ -64,6 +65,40 @@ test('mergeFields preserves explicit AI/CV checkbox field types', () => {
   assert.equal(field.source, 'yolo-cv');
 });
 
+test('mergeFields preserves stacked text fields with matching x positions', () => {
+  const fields = mergeFields([
+    {
+      type: 'text',
+      page: 1,
+      x: 144,
+      y: 447,
+      width: 189,
+      height: 15,
+      source: 'heuristic-keyword',
+      confidence: 0.82,
+      context: 'Full Name: __________________________________',
+    },
+    {
+      type: 'text',
+      page: 1,
+      x: 144,
+      y: 430,
+      width: 189,
+      height: 15,
+      source: 'heuristic-keyword',
+      confidence: 0.82,
+      context: 'Title: __________________________________',
+    },
+  ], [
+    { page: 1, width: 612, height: 792 },
+  ]);
+
+  assert.deepEqual(fields.map((field) => field.context), [
+    'Full Name: __________________________________',
+    'Title: __________________________________',
+  ]);
+});
+
 test('textLayoutFieldsFromLines sizes explicit Date fields before the next label', () => {
   const metric = { page: 2, width: 612, height: 792 };
   const fields = textLayoutFieldsFromLines([
@@ -101,14 +136,15 @@ test('textLayoutFieldsFromLines treats each on-this-day execution blank as its o
   ], 2, { page: 2, width: 612, height: 792 }, [{ email: 'signer@example.com' }]);
 
   const textFields = fields.filter((field) => field.type === 'text');
-  const numberField = fields.find((field) => field.type === 'number');
+  const numberFields = fields.filter((field) => field.type === 'number');
 
   assert.equal(fields.some((field) => field.type === 'date'), false);
   assert.equal(textFields.length, 2);
-  assert.deepEqual(textFields.map((field) => field.x), [300, 380]);
-  assert.deepEqual(textFields.map((field) => field.width), [40, 120]);
-  assert.equal(numberField.x, 520);
-  assert.equal(numberField.width, 24);
+  assert.deepEqual(textFields.map((field) => field.x), [120, 380]);
+  assert.deepEqual(textFields.map((field) => field.detection.fragmentRole), ['execution-place', 'month']);
+  assert.equal(numberFields.length, 2);
+  assert.deepEqual(numberFields.map((field) => field.x), [300, 520]);
+  assert.deepEqual(numberFields.map((field) => field.detection.fragmentRole), ['day', 'year']);
 });
 
 test('buildMiddlePageInitialFields skips first and last page', () => {
@@ -145,6 +181,20 @@ test('textLayoutFieldsFromLines can use drawn horizontal PDF lines', () => {
   assert.equal(fields[0].width, 240);
 });
 
+test('textLayoutFieldsFromLines ignores body text that merely mentions signature blocks', () => {
+  const fields = textLayoutFieldsFromLines([
+    {
+      text: 'Blank signature blocks, schedules, and annexures must be completed. No warranty is created by this clause.',
+      y: 635,
+      runs: [],
+    },
+  ], 1, { page: 1, width: 612, height: 792 }, [{ email: 'signer@example.com' }], [
+    { source: 'pdf-path-line', x: 60, y: 635, width: 475, chars: 95 },
+  ]);
+
+  assert.equal(fields.some((field) => field.type === 'signature'), false);
+});
+
 test('textLayoutFieldsFromLines trims drawn line fields before later text', () => {
   const fields = textLayoutFieldsFromLines([
     {
@@ -164,6 +214,223 @@ test('textLayoutFieldsFromLines trims drawn line fields before later text', () =
 
   assert.ok(dateField.x > 76);
   assert.ok(dateField.x + dateField.width < 220);
+});
+
+test('assignFieldsToSigners keeps execution-date fragments with the nearest signature block', () => {
+  const assigned = assignFieldsToSigners([
+    {
+      id: 'place_a',
+      type: 'text',
+      page: 3,
+      x: 125,
+      y: 627,
+      width: 112,
+      height: 26,
+      detection: { isInlineDateClause: true, clauseLineId: 'a', fragmentRole: 'execution-place' },
+    },
+    {
+      id: 'sig_a',
+      type: 'signature',
+      page: 3,
+      x: 68,
+      y: 485,
+      width: 328,
+      height: 30,
+    },
+    {
+      id: 'year_b',
+      type: 'number',
+      page: 3,
+      x: 480,
+      y: 455,
+      width: 24,
+      height: 28,
+      detection: { isInlineDateClause: true, clauseLineId: 'b', fragmentRole: 'year' },
+    },
+    {
+      id: 'sig_b',
+      type: 'signature',
+      page: 3,
+      x: 68,
+      y: 313,
+      width: 328,
+      height: 30,
+    },
+  ], [
+    { email: 'a@example.com', role: 'Party A' },
+    { email: 'b@example.com', role: 'Party B' },
+  ]);
+
+  assert.equal(assigned.find((field) => field.id === 'place_a').assignedTo, 'a@example.com');
+  assert.equal(assigned.find((field) => field.id === 'sig_a').assignedTo, 'a@example.com');
+  assert.equal(assigned.find((field) => field.id === 'year_b').assignedTo, 'b@example.com');
+  assert.equal(assigned.find((field) => field.id === 'sig_b').assignedTo, 'b@example.com');
+});
+
+test('assignFieldsToSigners assigns one complete repeated signing block before moving to the next signer', () => {
+  const signerBlockHint = (signerIndex) => ({ signerIndex, signerAssignmentSource: 'signer-block' });
+  const assigned = assignFieldsToSigners([
+    {
+      id: 'top_place',
+      type: 'text',
+      page: 5,
+      x: 114,
+      y: 516,
+      width: 125,
+      height: 28,
+      detection: { ...signerBlockHint(0), isInlineDateClause: true, clauseLineId: 'top', fragmentRole: 'execution-place' },
+    },
+    {
+      id: 'top_day',
+      type: 'number',
+      page: 5,
+      x: 286,
+      y: 516,
+      width: 47,
+      height: 28,
+      detection: { ...signerBlockHint(0), isInlineDateClause: true, clauseLineId: 'top', fragmentRole: 'day' },
+    },
+    {
+      id: 'top_sig',
+      type: 'signature',
+      page: 5,
+      x: 144,
+      y: 464,
+      width: 189,
+      height: 30,
+      detection: signerBlockHint(1),
+    },
+    {
+      id: 'top_name',
+      type: 'text',
+      page: 5,
+      x: 144,
+      y: 447,
+      width: 189,
+      height: 20,
+      detection: signerBlockHint(1),
+    },
+    {
+      id: 'bottom_place',
+      type: 'text',
+      page: 5,
+      x: 114,
+      y: 378,
+      width: 125,
+      height: 28,
+      detection: { ...signerBlockHint(1), isInlineDateClause: true, clauseLineId: 'bottom', fragmentRole: 'execution-place' },
+    },
+    {
+      id: 'bottom_sig',
+      type: 'signature',
+      page: 5,
+      x: 144,
+      y: 326,
+      width: 189,
+      height: 30,
+      detection: signerBlockHint(1),
+    },
+    {
+      id: 'bottom_name',
+      type: 'text',
+      page: 5,
+      x: 144,
+      y: 309,
+      width: 189,
+      height: 20,
+      detection: signerBlockHint(1),
+    },
+  ], [
+    { email: 'a@example.com', role: 'Party A' },
+    { email: 'b@example.com', role: 'Party B' },
+  ]);
+
+  for (const id of ['top_place', 'top_day', 'top_sig', 'top_name']) {
+    assert.equal(assigned.find((field) => field.id === id).assignedTo, 'a@example.com', id);
+  }
+  for (const id of ['bottom_place', 'bottom_sig', 'bottom_name']) {
+    assert.equal(assigned.find((field) => field.id === id).assignedTo, 'b@example.com', id);
+  }
+});
+
+test('assignFieldsToSigners assigns repeated table signing groups sequentially without signatures', () => {
+  const signerBlockHint = { signerIndex: 0, signerAssignmentSource: 'signer-block' };
+  const assigned = assignFieldsToSigners([
+    {
+      id: 'company_place',
+      type: 'text',
+      page: 2,
+      x: 135,
+      y: 725,
+      width: 236,
+      height: 18,
+      context: 'Signed at:-',
+    },
+    {
+      id: 'company_date',
+      type: 'date',
+      page: 2,
+      x: 135,
+      y: 700,
+      width: 236,
+      height: 18,
+      context: 'Date:-',
+    },
+    {
+      id: 'company_name',
+      type: 'text',
+      page: 2,
+      x: 135,
+      y: 610,
+      width: 236,
+      height: 16,
+      context: 'Name',
+      detection: signerBlockHint,
+    },
+    {
+      id: 'company_designation',
+      type: 'text',
+      page: 2,
+      x: 135,
+      y: 589,
+      width: 236,
+      height: 16,
+      context: 'Designation',
+      detection: signerBlockHint,
+    },
+    {
+      id: 'consultant_place',
+      type: 'text',
+      page: 2,
+      x: 135,
+      y: 482,
+      width: 236,
+      height: 16,
+      context: 'Signed at:-',
+      detection: signerBlockHint,
+    },
+    {
+      id: 'consultant_date',
+      type: 'date',
+      page: 2,
+      x: 135,
+      y: 465,
+      width: 236,
+      height: 16,
+      context: 'Date:-',
+      detection: signerBlockHint,
+    },
+  ], [
+    { email: 'a@example.com', role: 'Party A' },
+    { email: 'b@example.com', role: 'Party B' },
+  ]);
+
+  for (const id of ['company_place', 'company_date', 'company_name', 'company_designation']) {
+    assert.equal(assigned.find((field) => field.id === id).assignedTo, 'a@example.com', id);
+  }
+  for (const id of ['consultant_place', 'consultant_date']) {
+    assert.equal(assigned.find((field) => field.id === id).assignedTo, 'b@example.com', id);
+  }
 });
 
 test('textLayoutFieldsFromLines detects sign, full name, and title line fields', () => {
@@ -198,6 +465,66 @@ test('textLayoutFieldsFromLines detects sign, full name, and title line fields',
   assert.equal(signatureField.width, 140);
   assert.deepEqual(textFields.map((field) => field.x), [150, 125]);
   assert.deepEqual(textFields.map((field) => field.width), [210, 150]);
+});
+
+test('textLayoutFieldsFromLines treats designation as text, not signature', () => {
+  const fields = textLayoutFieldsFromLines([
+    {
+      text: 'Designation: ____________________',
+      y: 420,
+      runs: [
+        { textIndex: 13, textEnd: 33, x: 150, y: 420, width: 180, chars: 20 },
+      ],
+    },
+  ], 1, { page: 1, width: 612, height: 792 }, [{ email: 'signer@example.com' }]);
+
+  assert.equal(fields.length, 1);
+  assert.equal(fields[0].type, 'text');
+});
+
+test('textLayoutFieldsFromLines ignores table prose that mentions sign authority', () => {
+  const fields = textLayoutFieldsFromLines([
+    {
+      text: 'I warrant that I have been duly authorised to sign this document',
+      y: 324,
+      runs: [],
+      items: [
+        { text: 'I warrant that I have been duly authorised to sign this document', textIndex: 0, textEnd: 62, x: 68, y: 324, width: 330, height: 12, charWidth: 5.3 },
+      ],
+      x: 68,
+      right: 398,
+      height: 12,
+    },
+  ], 1, { page: 1, width: 612, height: 792 }, [{ email: 'signer@example.com' }], [], [
+    { x: 50, y: 300, width: 370, height: 60 },
+    { x: 420, y: 300, width: 140, height: 60 },
+  ]);
+
+  assert.equal(fields.length, 0);
+});
+
+test('textLayoutFieldsFromLines skips inline table blanks without an empty adjacent cell', () => {
+  const fields = textLayoutFieldsFromLines([
+    {
+      text: 'Designation: ______________________________',
+      y: 324,
+      runs: [
+        { textIndex: 13, textEnd: 43, x: 132, y: 324, width: 238, chars: 30 },
+      ],
+      items: [
+        { text: 'Designation:', textIndex: 0, textEnd: 12, x: 68, y: 324, width: 62, height: 12, charWidth: 5.2 },
+        { text: '______________________________', textIndex: 13, textEnd: 43, x: 132, y: 324, width: 238, height: 12, charWidth: 7.9 },
+      ],
+      x: 68,
+      right: 370,
+      height: 12,
+    },
+  ], 1, { page: 1, width: 612, height: 792 }, [{ email: 'signer@example.com' }], [], [
+    { x: 50, y: 300, width: 220, height: 60 },
+    { x: 270, y: 300, width: 220, height: 60 },
+  ]);
+
+  assert.equal(fields.length, 0);
 });
 
 test('textLayoutFieldsFromLines places table signatures inside the table cell area', () => {
@@ -259,6 +586,39 @@ test('textLayoutFieldsFromLines skips occupied target table cells', () => {
   assert.equal(fields.length, 0);
 });
 
+test('textLayoutFieldsFromLines does not jump over occupied adjacent table cells', () => {
+  const fields = textLayoutFieldsFromLines([
+    {
+      text: 'Signature',
+      y: 324,
+      runs: [],
+      items: [
+        { text: 'Signature', textIndex: 0, textEnd: 9, x: 68, y: 324, width: 54, height: 12, charWidth: 6 },
+      ],
+      x: 68,
+      right: 122,
+      height: 12,
+    },
+    {
+      text: 'Occupied',
+      y: 324,
+      runs: [],
+      items: [
+        { text: 'Occupied', textIndex: 0, textEnd: 8, x: 178, y: 324, width: 58, height: 12, charWidth: 7.2 },
+      ],
+      x: 178,
+      right: 236,
+      height: 12,
+    },
+  ], 1, { page: 1, width: 612, height: 792 }, [{ email: 'signer@example.com' }], [], [
+    { x: 50, y: 300, width: 110, height: 60 },
+    { x: 160, y: 300, width: 140, height: 60 },
+    { x: 300, y: 300, width: 220, height: 60 },
+  ]);
+
+  assert.equal(fields.length, 0);
+});
+
 test('textLayoutFieldsFromLines places table text fields inside the table cell area', () => {
   const fields = textLayoutFieldsFromLines([
     {
@@ -286,6 +646,36 @@ test('textLayoutFieldsFromLines places table text fields inside the table cell a
   assert.equal(fields[0].detector, 'pdfjs-table-text-cell');
 });
 
+test('textLayoutFieldsFromLines places table fields in the adjacent blank cell, not on the label text', () => {
+  const targetCell = { x: 160, y: 300, width: 260, height: 44 };
+  const fields = textLayoutFieldsFromLines([
+    {
+      text: 'Name ______________________________',
+      y: 324,
+      runs: [
+        { textIndex: 5, textEnd: 35, x: 178, y: 324, width: 210, chars: 30 },
+      ],
+      items: [
+        { text: 'Name', textIndex: 0, textEnd: 4, x: 68, y: 324, width: 34, height: 12, charWidth: 8.5 },
+        { text: '______________________________', textIndex: 5, textEnd: 35, x: 178, y: 324, width: 210, height: 12, charWidth: 7 },
+      ],
+      x: 68,
+      right: 388,
+      height: 12,
+    },
+  ], 1, { page: 1, width: 612, height: 792 }, [{ email: 'signer@example.com' }], [], [
+    { x: 50, y: 300, width: 110, height: 44 },
+    targetCell,
+  ]);
+
+  assert.equal(fields.length, 1);
+  assert.equal(fields[0].type, 'text');
+  assert.ok(fields[0].x >= targetCell.x);
+  assert.ok(fields[0].x + fields[0].width <= targetCell.x + targetCell.width);
+  assert.ok(fields[0].y >= targetCell.y);
+  assert.ok(fields[0].y + fields[0].height <= targetCell.y + targetCell.height);
+});
+
 test('textLayoutFieldsFromLines prevents table fields from overlapping each other', () => {
   const fields = textLayoutFieldsFromLines([
     {
@@ -311,8 +701,10 @@ test('textLayoutFieldsFromLines prevents table fields from overlapping each othe
       height: 12,
     },
   ], 1, { page: 1, width: 612, height: 792 }, [{ email: 'signer@example.com' }], [], [
-    { x: 50, y: 300, width: 110, height: 90 },
-    { x: 160, y: 300, width: 220, height: 90 },
+    { x: 50, y: 345, width: 110, height: 45 },
+    { x: 160, y: 345, width: 220, height: 45 },
+    { x: 50, y: 300, width: 110, height: 45 },
+    { x: 160, y: 300, width: 220, height: 45 },
   ]);
 
   assert.equal(fields.length, 2);
@@ -350,7 +742,7 @@ test('textLayoutFieldsFromLines keeps stacked line text fields equal height and 
 
   const textFields = fields.filter((field) => field.type === 'text');
   assert.equal(textFields.length, 3);
-  assert.deepEqual([...new Set(textFields.map((field) => field.height))], [14]);
+  assert.deepEqual([...new Set(textFields.map((field) => field.height))], [14, 12]);
   assert.ok(textFields[1].y + textFields[1].height <= textFields[0].y);
   assert.ok(textFields[2].y + textFields[2].height <= textFields[1].y);
 });
@@ -405,5 +797,107 @@ test('pathGeometryFromOperatorList derives table cells from rectangle edges and 
     cell.y === 360 &&
     cell.width === 300 &&
     cell.height === 60
+  ));
+});
+
+test('table detection handles compact signing rows without leaking generic underline fields', () => {
+  const ops = { constructPath: 91 };
+  const line = (left, y, right) => [20, [], [left, y, right, y]];
+  const vline = (x, bottom, top) => [20, [], [x, bottom, x, top]];
+  const geometry = pathGeometryFromOperatorList({
+    fnArray: Array(16).fill(ops.constructPath),
+    argsArray: [
+      line(49, 746, 377),
+      line(49, 722, 377),
+      line(49, 697, 377),
+      line(49, 627, 377),
+      line(49, 607, 377),
+      line(49, 586, 377),
+      line(49, 556, 377),
+      line(49, 497, 377),
+      line(49, 479, 377),
+      line(49, 462, 377),
+      line(49, 423, 377),
+      line(49, 401, 377),
+      vline(49, 401, 746),
+      vline(128, 586, 746),
+      vline(128, 462, 497),
+      vline(377, 401, 746),
+    ],
+  }, { page: 1, width: 595, height: 842 }, ops);
+
+  const hasCell = (x, y, width, height) =>
+    geometry.tableCells.some((cell) =>
+      cell.x === x &&
+      cell.y === y &&
+      cell.width === width &&
+      cell.height === height
+    );
+
+  assert.equal(hasCell(128, 607, 249, 20), true);
+  assert.equal(hasCell(49, 401, 328, 22), true);
+
+  const item = (text, x, y, width) => ({
+    text,
+    textIndex: 0,
+    textEnd: text.length,
+    x,
+    y,
+    width,
+    height: 10,
+    charWidth: width / Math.max(1, text.length),
+  });
+  const lines = [
+    { text: 'Signed at:-', y: 736, x: 55, right: 107, height: 10, items: [item('Signed at:-', 55, 736, 52)], runs: [] },
+    { text: 'Date:-', y: 712, x: 55, right: 83, height: 10, items: [item('Date:-', 55, 712, 28)], runs: [] },
+    { text: 'Name', y: 615, x: 55, right: 82, height: 10, items: [item('Name', 55, 615, 27)], runs: [] },
+    { text: 'Designation', y: 594, x: 55, right: 112, height: 10, items: [item('Designation', 55, 594, 57)], runs: [] },
+    {
+      text: 'I warrant that I have been duly authorised to sign this',
+      y: 576,
+      x: 133,
+      right: 367,
+      height: 10,
+      items: [item('I warrant that I have been duly authorised to sign this', 133, 576, 234)],
+      runs: [],
+    },
+    { text: 'Agreement', y: 565, x: 133, right: 182, height: 10, items: [item('Agreement', 133, 565, 49)], runs: [] },
+    { text: 'Signed at:-', y: 488, x: 55, right: 107, height: 10, items: [item('Signed at:-', 55, 488, 52)], runs: [] },
+    { text: 'Date:-', y: 470, x: 55, right: 83, height: 10, items: [item('Date:-', 55, 470, 28)], runs: [] },
+    {
+      text: '[INSERT NAME OF CONSULTANT]',
+      y: 411,
+      x: 55,
+      right: 219,
+      height: 10,
+      items: [item('[INSERT NAME OF CONSULTANT]', 55, 411, 164)],
+      runs: [],
+    },
+  ];
+
+  const fields = textLayoutFieldsFromLines(
+    lines,
+    1,
+    { page: 1, width: 595, height: 842 },
+    [{ email: 'signer@example.com' }],
+    geometry.horizontalLines,
+    geometry.tableCells
+  );
+
+  assert.deepEqual(fields.map((field) => field.context), [
+    'Signed at:-',
+    'Date:-',
+    'Name',
+    'Designation',
+    'Signed at:-',
+    'Date:-',
+  ]);
+  assert.equal(fields.some((field) => field.type === 'signature'), false);
+  assert.equal(fields.some((field) => String(field.detector).startsWith('pdfjs-text-underline')), false);
+  assert.ok(fields.every((field) =>
+    field.x >= field.detection.tableCell.x &&
+    field.x + field.width <= field.detection.tableCell.x + field.detection.tableCell.width &&
+    field.y >= field.detection.tableCell.y &&
+    field.y + field.height <= field.detection.tableCell.y + field.detection.tableCell.height
   ));
 });

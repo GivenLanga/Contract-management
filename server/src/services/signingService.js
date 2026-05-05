@@ -8,6 +8,38 @@ const base64ToBuffer = (base64) => {
   return Buffer.from(data, 'base64');
 };
 
+const placementToPdfRect = (page, placement) => {
+  const { width: pageWidth, height: pageHeight } = page.getSize();
+  const origin = placement.origin || 'top-left';
+
+  if (origin === 'normalized') {
+    const width = Number(placement.width || 0) * pageWidth;
+    const height = Number(placement.height || 0) * pageHeight;
+    return {
+      x: Number(placement.x || 0) * pageWidth,
+      y: pageHeight - (Number(placement.y || 0) * pageHeight) - height,
+      width,
+      height,
+    };
+  }
+
+  if (origin === 'pdf') {
+    return {
+      x: Number(placement.x || 0),
+      y: Number(placement.y || 0),
+      width: Number(placement.width || 0),
+      height: Number(placement.height || 0),
+    };
+  }
+
+  return {
+    x: Number(placement.x || 0),
+    y: pageHeight - Number(placement.y || 0) - Number(placement.height || 0),
+    width: Number(placement.width || 0),
+    height: Number(placement.height || 0),
+  };
+};
+
 /**
  * Embed a signature image into a PDF at a specified position.
  * Also adds initials to all middle pages (not first or last).
@@ -19,6 +51,7 @@ const embedSignatureInPDF = async (pdfPath, signatureBase64, options = {}) => {
     y = 100,
     width = 200,
     height = 80,
+    origin = 'top-left',
     initialsBase64 = null,
     signerName = '',
     signerEmail = '',
@@ -41,26 +74,26 @@ const embedSignatureInPDF = async (pdfPath, signatureBase64, options = {}) => {
   }
 
   const targetPage = pages[Math.min(page, pages.length - 1)];
-  const { height: pageHeight } = targetPage.getSize();
+  const rect = placementToPdfRect(targetPage, { x, y, width, height, origin });
 
   targetPage.drawImage(sigImage, {
-    x,
-    y: pageHeight - y - height,
-    width,
-    height,
+    x: rect.x,
+    y: rect.y,
+    width: rect.width,
+    height: rect.height,
   });
 
   // Signature date + name under signature
   targetPage.drawText(`Signed: ${signerName}`, {
-    x,
-    y: pageHeight - y - height - 14,
+    x: rect.x,
+    y: rect.y - 14,
     size: 9,
     font,
     color: rgb(0.3, 0.3, 0.3),
   });
   targetPage.drawText(signedAt.toLocaleString(), {
-    x,
-    y: pageHeight - y - height - 26,
+    x: rect.x,
+    y: rect.y - 26,
     size: 8,
     font,
     color: rgb(0.5, 0.5, 0.5),
@@ -72,11 +105,13 @@ const embedSignatureInPDF = async (pdfPath, signatureBase64, options = {}) => {
     try {
       const initBuffer = base64ToBuffer(initialsBase64);
       initImage = await pdfDoc.embedPng(initBuffer);
-    } catch {}
+    } catch {
+      // Fall back to text initials below.
+    }
 
     for (let i = 1; i < pages.length - 1; i++) {
       const p = pages[i];
-      const { width: pw, height: ph } = p.getSize();
+      const { width: pw } = p.getSize();
 
       if (initImage) {
         p.drawImage(initImage, { x: pw - 80, y: 20, width: 60, height: 24 });
@@ -94,7 +129,7 @@ const embedSignatureInPDF = async (pdfPath, signatureBase64, options = {}) => {
 
   // Add audit footer to the last page
   const lastPage = pages[pages.length - 1];
-  const { width: lw, height: lh } = lastPage.getSize();
+  const { width: lw } = lastPage.getSize();
   lastPage.drawLine({
     start: { x: 40, y: 60 },
     end: { x: lw - 40, y: 60 },

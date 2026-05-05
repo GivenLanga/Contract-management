@@ -22,6 +22,7 @@
   display: flex; align-items: center; justify-content: center; flex-shrink: 0;
 }
 .modal-close:hover { background: #e2e8f0; }
+.modal-close:disabled { cursor: not-allowed; opacity: .6; }
 
 .sig-modal-body { padding: 22px 26px; overflow-y: auto; display: flex; flex-direction: column; gap: 20px; flex: 1; }
 
@@ -73,7 +74,18 @@
   padding: 32px; text-align: center; color: #94a3b8; display: flex;
   flex-direction: column; align-items: center; gap: 8px;
 }
-.sig-upload-placeholder span:first-child { font-size: 32px; }
+.sig-upload-icon {
+  width: 42px;
+  height: 30px;
+  border-radius: 7px;
+  background: #e2e8f0;
+  color: #334155;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 800;
+}
 .sig-upload-placeholder p { font-size: 14px; color: #64748b; margin: 0; }
 .sig-upload-placeholder span:last-child { font-size: 12px; }
 .sig-preview { max-height: 160px; width: 100%; object-fit: contain; padding: 16px; }
@@ -96,6 +108,32 @@
   background: #fff; cursor: pointer; color: #64748b; text-align: center;
 }
 .sig-upload-btn:hover { background: #f1f5f9; }
+
+.sig-initials-typed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 180px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #475569;
+}
+.sig-initials-typed input {
+  height: 38px;
+  padding: 8px 10px;
+  border: 1.5px solid #d1d5db;
+  border-radius: 8px;
+  color: #1a2744;
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.sig-initials-typed input:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37,99,235,.12);
+}
 
 .sig-error {
   background: #fef2f2; border: 1px solid #fca5a5; color: #dc2626;
@@ -121,3 +159,28 @@
 }
 .sig-btn--sign:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(37,99,235,.4); }
 .sig-btn--sign:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+.sig-tab:focus-visible,
+.sig-clear-btn:focus-visible,
+.sig-upload-btn:focus-within,
+.sig-btn:focus-visible,
+.modal-close:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .sig-overlay { padding: 10px; align-items: flex-end; }
+  .sig-modal { max-height: 94vh; border-radius: 16px 16px 0 0; }
+  .sig-modal-header,
+  .sig-modal-body,
+  .sig-modal-footer {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .sig-tabs { flex-wrap: wrap; }
+  .sig-initials-wrap { align-items: flex-start; flex-direction: column; }
+  .sig-initials-actions { flex-direction: row; }
+  .sig-actions { flex-direction: column-reverse; }
+  .sig-btn { width: 100%; }
+}

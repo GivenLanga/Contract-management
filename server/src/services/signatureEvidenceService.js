@@ -18,6 +18,13 @@ const dataUriPayload = (dataUri) =>
 
 const imageHash = (dataUri) => sha256(dataUriPayload(dataUri));
 
+const normalizeSignatureMethod = (method) => {
+  const value = String(method || '').trim().toLowerCase();
+  if (value === 'upload' || value === 'uploaded') return 'uploaded';
+  if (value === 'type' || value === 'typed') return 'typed';
+  return 'drawn';
+};
+
 const summarizePointerTelemetry = (telemetry = {}) => {
   const strokes = Array.isArray(telemetry.strokes) ? telemetry.strokes : [];
   const events = strokes.flatMap((stroke) => Array.isArray(stroke.points) ? stroke.points : []);
@@ -74,7 +81,7 @@ const buildSignatureEvidence = ({
   method,
   signedAt,
 }) => {
-  const normalizedMethod = method === 'draw' ? 'drawn' : method || 'drawn';
+  const normalizedMethod = normalizeSignatureMethod(method);
   const signatureImageHash = imageHash(signatureData);
   const initialsImageHash = initialsData ? imageHash(initialsData) : '';
   const telemetryHash = telemetry ? sha256(stableJson(telemetry)) : '';
@@ -113,5 +120,6 @@ module.exports = {
   sha256,
   imageHash,
   buildSignatureEvidence,
+  normalizeSignatureMethod,
   summarizePointerTelemetry,
 };

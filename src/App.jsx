@@ -19,6 +19,7 @@ import LegalFolder from './components/Documents/LegalFolder';
 import SigningDashboard from './components/Signing/SigningDashboard';
 import SigningViewer from './components/Signing/SigningViewer';
 import SigningEnvelope from './components/Signing/SigningEnvelope';
+import ExternalSigningPage from './components/Signing/ExternalSigningPage';
 import AIAssistant from './components/AI/AIAssistant';
 import NotificationCenter from './components/Notifications/NotificationCenter';
 
@@ -38,6 +39,7 @@ function AppShell() {
   if (!user) {
     return (
       <Routes>
+        <Route path="/sign/external/:token" element={<ExternalSigningPage />} />
         <Route path="/login" element={<Login />} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
@@ -46,34 +48,42 @@ function AppShell() {
 
   return (
     <NotificationProvider>
-      <div className="app">
-        <Sidebar
-          collapsed={sidebarCollapsed}
-          onToggle={() => setSidebarCollapsed((c) => !c)}
-        />
-        <main className="app__main">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/contracts" element={<ContractList />} />
-            <Route path="/contracts/new" element={<ContractForm />} />
-            <Route path="/contracts/:id" element={<ContractDetail />} />
-            <Route path="/contracts/:id/edit" element={<ContractForm />} />
-            <Route path="/templates" element={<Templates />} />
-            <Route path="/workflows" element={<Workflows />} />
-            <Route path="/tasks" element={<TaskList />} />
-            <Route path="/legal-folder" element={<LegalFolder />} />
-            <Route path="/signing" element={<SigningDashboard />} />
-            <Route path="/signing/view/:docId" element={<SigningViewer />} />
-            <Route path="/signing/envelope/:docId" element={<SigningEnvelope />} />
-            <Route path="/ai" element={<AIAssistant />} />
-            <Route path="/notifications" element={<NotificationCenter />} />
-            <Route path="/reports" element={<Reports />} />
-            <Route path="/settings" element={<Settings />} />
-            <Route path="/login" element={<Navigate to="/" replace />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </main>
-      </div>
+      <Routes>
+        {/* Public standalone route — no sidebar, no shell */}
+        <Route path="/sign/external/:token" element={<ExternalSigningPage />} />
+
+        {/* All authenticated routes wrapped in the sidebar shell */}
+        <Route path="*" element={
+          <div className="app">
+            <Sidebar
+              collapsed={sidebarCollapsed}
+              onToggle={() => setSidebarCollapsed((c) => !c)}
+            />
+            <main className="app__main">
+              <Routes>
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/contracts" element={<ContractList />} />
+                <Route path="/contracts/new" element={<ContractForm />} />
+                <Route path="/contracts/:id" element={<ContractDetail />} />
+                <Route path="/contracts/:id/edit" element={<ContractForm />} />
+                <Route path="/templates" element={<Templates />} />
+                <Route path="/workflows" element={<Workflows />} />
+                <Route path="/tasks" element={<TaskList />} />
+                <Route path="/legal-folder" element={<LegalFolder />} />
+                <Route path="/signing" element={<SigningDashboard />} />
+                <Route path="/signing/view/:docId" element={<SigningViewer />} />
+                <Route path="/signing/envelope/:docId" element={<SigningEnvelope />} />
+                <Route path="/ai" element={<AIAssistant />} />
+                <Route path="/notifications" element={<NotificationCenter />} />
+                <Route path="/reports" element={<Reports />} />
+                <Route path="/settings" element={<Settings />} />
+                <Route path="/login" element={<Navigate to="/" replace />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </main>
+          </div>
+        } />
+      </Routes>
     </NotificationProvider>
   );
 }
