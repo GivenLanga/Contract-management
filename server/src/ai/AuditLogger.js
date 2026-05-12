@@ -3,13 +3,26 @@ const { redactSensitiveText } = require('./security/PromptSecurity');
 
 const SENSITIVE_KEYS = new Set([
   'password',
+  'passwordHash',
   'token',
+  'tokenHash',
   'secret',
   'signatureData',
   'initialsData',
+  'signatureToken',
+  'signingToken',
+  'signingUrl',
+  'secureUrl',
+  'evidence',
+  'ipAddress',
+  'userAgent',
+  'certificate',
   'apiKey',
   'authorization',
   'cookie',
+  'prompt',
+  'snippet',
+  'payload',
 ]);
 
 class AuditLogger {
@@ -45,6 +58,48 @@ class AuditLogger {
         performedByEmail: user?.email,
         ipAddress,
         metadata: this._sanitise(detail),
+        result: 'failure',
+      });
+    } catch {
+      // Audit failures must not break the assistant response
+    }
+  }
+
+  async logRagRetrieval({ user, sourceType, query, retrievedCount = 0, blockedCount = 0, securityFlags = [], redactionCount = 0, ipAddress }) {
+    try {
+      if (AuditLog.db.readyState !== 1) return;
+      await AuditLog.create({
+        action: `AI RAG: ${sourceType}`,
+        category: 'system',
+        performedBy: user?._id,
+        performedByEmail: user?.email,
+        ipAddress,
+        metadata: this._sanitise({
+          sourceType,
+          querySummary: String(query || '').slice(0, 160),
+          retrievedCount,
+          blockedCount,
+          securityFlags: Array.from(new Set(securityFlags || [])).slice(0, 20),
+          redactionCount,
+          userRole: user?.role,
+        }),
+        result: blockedCount > 0 || securityFlags?.length ? 'failure' : 'success',
+      });
+    } catch {
+      // Audit failures must not break the assistant response
+    }
+  }
+
+  async logAiTimeout({ user, phase, timeoutMs, ipAddress }) {
+    try {
+      if (AuditLog.db.readyState !== 1) return;
+      await AuditLog.create({
+        action: `AI timeout: ${phase}`,
+        category: 'system',
+        performedBy: user?._id,
+        performedByEmail: user?.email,
+        ipAddress,
+        metadata: { phase, timeoutMs },
         result: 'failure',
       });
     } catch {

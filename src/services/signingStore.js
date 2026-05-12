@@ -168,6 +168,10 @@ export const requestSigning = (docId, payload, user) => {
       ...(doc.signingPreparation || {}),
       pageMetrics: payload.pageMetrics || doc.signingPreparation?.pageMetrics,
     },
+    signingEvidence: {
+      mode: payload.evidenceMode || 'standard',
+      ...(payload.evidenceMode === 'ron' ? { ron: payload.ronConfig || {} } : {}),
+    },
     signingOrder: payload.signingOrder || 'parallel',
     message: payload.message || '',
     preparedBy,
@@ -187,13 +191,20 @@ export const requestSigning = (docId, payload, user) => {
 export const signDocument = (docId, payload, user) => {
   const doc = getSigningDocument(docId);
   if (!doc) throw new Error('Document not found in Legal Folder.');
+  if (payload.consentAccepted !== true) throw new Error('Electronic signature consent is required before signing.');
 
   const signerEmail = user?.email || payload.signerEmail || 'local-signer@contractiq.local';
   const signerName = user?.name || payload.signerName || signerEmail;
+  const isConfiguredSigner = !doc.signers?.length || doc.signers.some((signer) =>
+    String(signer.email || '').trim().toLowerCase() === String(signerEmail || '').trim().toLowerCase()
+  );
+  if (!isConfiguredSigner) throw new Error('You are not a signer on this document.');
+
   const fields = doc.signingFields?.length
     ? doc.signingFields.map((field) => ({ ...field, required: true }))
     : [makeField(payload.signerRole || 'Signatory', 0, signerEmail)];
-  const signerOwnsField = (field) => field.assignedTo === signerEmail || !field.assignedTo;
+  const allowUnassigned = !doc.signers?.length || doc.signers.length <= 1;
+  const signerOwnsField = (field) => field.assignedTo === signerEmail || (allowUnassigned && !field.assignedTo);
   const fieldValues = payload.fieldValues && typeof payload.fieldValues === 'object' ? payload.fieldValues : {};
   const signatureIndex = fields.findIndex((field) =>
     !field.filled &&
@@ -264,6 +275,10 @@ export const signDocument = (docId, payload, user) => {
       origin: field.coordinateOrigin || 'normalized',
     },
     signedAt,
+    evidence: {
+      consentAccepted: payload.consentAccepted === true,
+      consentText: 'I agree to use electronic records and signatures for this document.',
+    },
     auditHash: shortHash(`${docId}-${signerEmail}-${payload.signatureData}-${signedAt}`),
   };
 

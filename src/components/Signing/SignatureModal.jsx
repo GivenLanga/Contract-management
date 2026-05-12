@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { normalizeSignatureCanvas, normalizeSignatureDataUrl } from './signatureImageUtils';
 import './SignatureModal.css';
 
 const MAX_SIGNATURE_IMAGE_BYTES = 2 * 1024 * 1024;
@@ -177,27 +178,8 @@ export default function SignatureModal({ document, signingField, captureMode = '
     }
   };
 
-  const removeBackground = (imageData) => {
-    const data = imageData.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const red = data[i];
-      const green = data[i + 1];
-      const blue = data[i + 2];
-      if (red > 230 && green > 230 && blue > 230) data[i + 3] = 0;
-    }
-    return imageData;
-  };
-
-  const canvasToTransparentPng = (canvas) => {
-    const ctx = canvas.getContext('2d');
-    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const cleaned = removeBackground(imgData);
-    const offscreen = window.document.createElement('canvas');
-    offscreen.width = canvas.width;
-    offscreen.height = canvas.height;
-    offscreen.getContext('2d').putImageData(cleaned, 0, 0);
-    return offscreen.toDataURL('image/png');
-  };
+  const canvasToSignaturePng = (canvas, kind = 'signature') =>
+    normalizeSignatureCanvas(canvas, { kind });
 
   const signaturePointCount = () =>
     (signatureTelemetryRef.current.strokes || []).reduce(
@@ -224,7 +206,7 @@ export default function SignatureModal({ document, signingField, captureMode = '
 
     ctx.textBaseline = 'middle';
     ctx.fillText(name, 24, canvas.height / 2 + 4);
-    return canvas.toDataURL('image/png');
+    return normalizeSignatureCanvas(canvas, { kind: 'signature' }) || canvas.toDataURL('image/png');
   };
 
   const typedInitialsData = () => {
@@ -240,7 +222,7 @@ export default function SignatureModal({ document, signingField, captureMode = '
     ctx.fillStyle = '#1a2744';
     ctx.textBaseline = 'middle';
     ctx.fillText(initials, 14, canvas.height / 2 + 2);
-    return canvas.toDataURL('image/png');
+    return normalizeSignatureCanvas(canvas, { kind: 'initials' }) || canvas.toDataURL('image/png');
   };
 
   const getSignatureData = () => {
@@ -248,7 +230,7 @@ export default function SignatureModal({ document, signingField, captureMode = '
       if (!hasDrawnSignature || signaturePointCount() < DRAWN_SIGNATURE_MIN_POINTS) return null;
       const canvas = canvasRef.current;
       if (!canvas) return null;
-      return canvasToTransparentPng(canvas);
+      return canvasToSignaturePng(canvas, 'signature');
     }
     if (tab === 'upload') return uploadedSig;
     if (tab === 'type') return typedSignatureData();
@@ -257,12 +239,13 @@ export default function SignatureModal({ document, signingField, captureMode = '
 
   const getInitialsData = () => {
     const canvas = initialsCanvasRef.current;
-    if (canvas && hasDrawnInitials) return canvasToTransparentPng(canvas);
+    if (canvas && hasDrawnInitials) return canvasToSignaturePng(canvas, 'initials');
     if (uploadedInitials) return uploadedInitials;
     return typedInitialsData();
   };
 
   const handleFileUpload = (setter, label) => (event) => {
+    const input = event.target;
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -279,11 +262,21 @@ export default function SignatureModal({ document, signingField, captureMode = '
     }
 
     const reader = new FileReader();
-    reader.onload = (loadEvent) => {
-      setError('');
-      setter(String(loadEvent.target?.result || ''));
+    reader.onload = async (loadEvent) => {
+      try {
+        const dataUrl = String(loadEvent.target?.result || '');
+        setter(await normalizeSignatureDataUrl(dataUrl, { kind: label === 'Initials' ? 'initials' : 'signature' }));
+        setError('');
+      } catch (readError) {
+        setError(readError.message || `Could not prepare the ${label.toLowerCase()} image.`);
+      } finally {
+        input.value = '';
+      }
     };
-    reader.onerror = () => setError(`Could not read the ${label.toLowerCase()} image.`);
+    reader.onerror = () => {
+      setError(`Could not read the ${label.toLowerCase()} image.`);
+      input.value = '';
+    };
     reader.readAsDataURL(file);
   };
 

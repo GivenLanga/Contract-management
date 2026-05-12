@@ -1,8 +1,10 @@
-const { can } = require('../../middleware/rbac');
-
-const RISK_ORDER = { low: 0, medium: 1, high: 2 };
+const { AiDataAccessPolicy } = require('../security/AiDataAccessPolicy');
 
 class PolicyEngine {
+  constructor(dataAccessPolicy = new AiDataAccessPolicy()) {
+    this._dataAccessPolicy = dataAccessPolicy;
+  }
+
   /**
    * Decide whether the tool call may proceed.
    * Returns { allowed, reason, requiresConfirmation }
@@ -12,11 +14,9 @@ class PolicyEngine {
       return { allowed: false, reason: 'Unknown tool.', requiresConfirmation: false };
     }
 
-    // Permission check
-    for (const perm of (tool.requiredPermissions || [])) {
-      if (!can(user, perm)) {
-        return { allowed: false, reason: `You do not have the "${perm}" permission.`, requiresConfirmation: false };
-      }
+    const permission = this._dataAccessPolicy.canUseTool(user, tool);
+    if (!permission.allowed) {
+      return { allowed: false, reason: permission.reason, requiresConfirmation: false };
     }
 
     const risk = tool.riskLevel || 'low';

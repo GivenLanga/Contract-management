@@ -110,8 +110,11 @@ const documentNeedsExternalParty = (doc, usersByEmail) => {
   );
 };
 
-const mapDocument = (doc) => {
+const canExposeSignerEmail = (user) => ['admin', 'manager'].includes(String(user?.role || '').toLowerCase());
+
+const mapDocument = (doc, user) => {
   const progress = signingProgress(doc);
+  const exposeEmail = canExposeSignerEmail(user);
   return {
     _id: doc._id,
     source: doc.source,
@@ -126,12 +129,12 @@ const mapDocument = (doc) => {
     signingProgress: progress,
     signers: (doc.signers || []).map((signer) => ({
       name: signer.name,
-      email: signer.email,
       role: signer.role,
+      ...(exposeEmail ? { email: signer.email } : {}),
     })),
     pendingFields: openRequiredFields(doc).map((field) => ({
-      assignedTo: field.assignedTo,
       role: field.role,
+      ...(exposeEmail ? { assignedTo: field.assignedTo } : {}),
     })),
   };
 };
@@ -261,10 +264,10 @@ const loadUsersByEmail = async (docs) => {
   return new Map(users.map((user) => [normalizeEmail(user.email), user]));
 };
 
-const resultForDocuments = (docs, { message, limit = 10, count = docs.length }) => ({
+const resultForDocuments = (docs, { message, limit = 10, count = docs.length, user }) => ({
   type: 'success',
   data: {
-    documents: docs.slice(0, limit).map(mapDocument),
+    documents: docs.slice(0, limit).map((doc) => mapDocument(doc, user)),
     count,
     message,
   },
@@ -290,6 +293,7 @@ module.exports = [
       return resultForDocuments(docs, {
         limit,
         count,
+        user: context.user,
         message: count === 0
           ? 'There are no documents in the signing platform waiting for signatures.'
           : `${count} document${count !== 1 ? 's are' : ' is'} in the signing platform waiting for signatures.`,
@@ -338,6 +342,7 @@ module.exports = [
       return resultForDocuments(docs, {
         limit,
         count,
+        user: context.user,
         message: count === 0
           ? 'No documents need your signature right now.'
           : `${count} document${count !== 1 ? 's need' : ' needs'} your signature.`,
@@ -388,6 +393,7 @@ module.exports = [
       return resultForDocuments(docs, {
         limit,
         count,
+        user: context.user,
         message: count === 0
           ? 'No documents are waiting for an external party signature.'
           : `${count} document${count !== 1 ? 's are' : ' is'} waiting for an external party signature.`,
@@ -456,15 +462,16 @@ module.exports = [
       if (!doc) return { type: 'not_found', message: `No signing document found for "${args.query}".` };
 
       const signedEmails = signedEmailsFor(doc);
+      const exposeEmail = canExposeSignerEmail(context.user);
       const signers = (doc.signers || []).map((signer) => {
         const email = normalizeEmail(signer.email);
         const signedAt = (doc.signatures || []).find((signature) => normalizeEmail(signature.signerEmail) === email)?.signedAt || null;
         return {
           name: signer.name,
-          email,
           role: signer.role,
           signed: signedEmails.has(email),
           signedAt,
+          ...(exposeEmail ? { email } : {}),
         };
       });
       const progress = signingProgress(doc);
@@ -545,6 +552,7 @@ module.exports = [
       return resultForDocuments(docs, {
         limit,
         count,
+        user: context.user,
         message: count === 0
           ? 'No documents have been fully signed yet.'
           : `${count} document${count !== 1 ? 's have' : ' has'} been signed.`,
@@ -597,6 +605,65 @@ module.exports = [
           label: doc.name,
           message: `Opening "${doc.name}" in the signing platform.`,
         },
+      };
+    },
+  },
+
+  {
+    name: 'query_signing',
+    description: 'Query safe signing metadata for visible documents, including pending, sent, awaiting, and fully signed states.',
+    riskLevel: 'low',
+    requiredPermissions: ['document:read'],
+    schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        filters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            status: { type: 'string', enum: ['Pending Signature', 'Signed'] },
+            awaitingSignature: { type: 'boolean' },
+            fullySigned: { type: 'boolean' },
+            sentForSignature: { type: 'boolean' },
+            pendingSignatories: { type: 'boolean' },
+          },
+        },
+        countOnly: { type: 'boolean' },
+        limit: { type: 'number', minimum: 1, maximum: 50 },
+      },
+    },
+    async execute(args, context) {
+      const { filters = {}, countOnly = false, limit = 20 } = args;
+      const statuses = filters.fullySigned || filters.status === SIGNED_STATUS
+        ? [SIGNED_STATUS]
+        : [PENDING_STATUS];
+      const docs = await loadSigningDocs(context, statuses);
+      const count = docs.length;
+      const signed = statuses.includes(SIGNED_STATUS);
+      const title = signed ? 'Signed Documents' : 'Pending Signatures';
+      const summary = signed
+        ? count === 1 ? '1 document has been signed.' : `${count} documents have been signed.`
+        : count === 1 ? '1 document is awaiting signature.' : `${count} documents are awaiting signature.`;
+
+      if (countOnly) {
+        return {
+          type: 'count_summary',
+          category: signed ? 'signed_documents' : 'awaiting_signature',
+          title,
+          summary,
+          metrics: { count, filters },
+          items: [],
+        };
+      }
+
+      return {
+        type: 'signing_summary',
+        category: signed ? 'signed_documents' : 'awaiting_signature',
+        title,
+        summary,
+        metrics: { count, returned: Math.min(count, limit), filters },
+        items: docs.slice(0, limit).map((doc) => mapDocument(doc, context.user)),
       };
     },
   },

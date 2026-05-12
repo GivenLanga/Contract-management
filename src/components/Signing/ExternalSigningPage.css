@@ -278,6 +278,65 @@
   box-shadow: 0 10px 28px rgba(15,23,42,.08);
 }
 
+.ext-screen-card {
+  width: min(520px, calc(100% - 32px));
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+.ext-auth-card {
+  text-align: center;
+}
+
+.ext-auth-actions {
+  width: min(360px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ext-auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ext-auth-form input {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 0 14px;
+  color: #111827;
+  font-size: 18px;
+  font-weight: 800;
+  text-align: center;
+  letter-spacing: .12em;
+  background: #fff;
+}
+
+.ext-receipt-grid {
+  width: min(420px, 100%);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px 14px;
+  padding: 14px;
+  border: 1px solid #d9e1ec;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #5b6575;
+  text-align: left;
+  font-size: 13px;
+}
+
+.ext-receipt-grid strong {
+  min-width: 0;
+  color: #111827;
+  overflow-wrap: anywhere;
+}
+
 .ext-side-panel {
   min-height: 0;
   overflow-y: auto;
@@ -355,6 +414,24 @@
   transition: width .2s ease;
 }
 
+.ext-next-field-button {
+  width: 100%;
+  min-height: 34px;
+  margin-top: 12px;
+  border: 1px solid #ccd6e3;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.ext-next-field-button:hover {
+  background: #f4f7fb;
+  border-color: #aeb9c8;
+}
+
 .ext-inline-alert,
 .ext-inline-note,
 .ext-form-error {
@@ -377,9 +454,196 @@
   color: #92400e;
 }
 
+.ext-ron-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.ext-ron-card-head,
+.ext-ron-detail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ext-ron-card-head span {
+  color: #2563eb;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.ext-ron-card-head strong {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.ext-ron-detail span {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ext-ron-detail strong {
+  min-width: 0;
+  color: #111827;
+  font-size: 12px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.ext-ron-upload {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ext-ron-upload input {
+  width: 100%;
+  padding: 9px;
+  border: 1px solid #d9e1ec;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  font-size: 12px;
+}
+
+.ext-ron-meeting {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ext-ron-meeting a {
+  color: #2563eb;
+  font-size: 13px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.ext-ron-meeting iframe {
+  width: 100%;
+  height: 220px;
+  border: 1px solid #d9e1ec;
+  border-radius: 8px;
+  background: #0f172a;
+}
+
+.ext-consent-check--ron {
+  margin-top: 0;
+  background: #fff;
+}
+
+/* SA Notarization — waiting room */
+.ext-ron-waiting-room {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 14px;
+  border-radius: 10px;
+  background: #eff6ff;
+  border: 1.5px solid #bfdbfe;
+}
+.ext-ron-waiting-icon { font-size: 28px; flex-shrink: 0; }
+.ext-ron-waiting-room p { margin: 4px 0; color: #374151; font-size: 13px; }
+.ext-ron-waiting-room strong { color: #1a2744; font-size: 13px; }
+.ext-ron-scheduled-time {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #1a2744;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* SA Notarization — status badges */
+.ext-ron-badge--live {
+  background: #dc2626 !important;
+  color: #fff !important;
+  animation: pulse-live 1.4s ease-in-out infinite;
+}
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.72; }
+}
+.ext-ron-verified { color: #166534 !important; }
+
+/* Identity upload hint */
+.ext-ron-upload-hint {
+  margin: 0 0 6px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Join link */
+.ext-ron-join-link {
+  display: inline-block;
+  padding: 9px 16px;
+  border-radius: 8px;
+  background: #1a2744;
+  color: #fff !important;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+.ext-ron-join-link:hover { background: #263460; }
+
+/* Apostille notice */
+.ext-ron-apostille-notice {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fef9c3;
+  border: 1px solid #fef08a;
+  color: #713f12;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .ext-side-actions {
   flex-direction: column;
   align-items: stretch;
+}
+
+.ext-consent-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d9e1ec;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.45;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ext-consent-check input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 0 0;
+  flex: 0 0 auto;
+  accent-color: #2563eb;
+}
+.ext-consent-check--optional {
+  background: #fff;
+  color: #475569;
+  font-weight: 600;
 }
 
 .ext-primary-button,
@@ -491,7 +755,9 @@
 .ext-icon-button:focus-visible,
 .ext-field:focus-visible,
 .ext-sign-tab:focus-visible,
-.ext-upload-small:focus-within {
+.ext-upload-small:focus-within,
+.ext-next-field-button:focus-visible,
+.ext-consent-check:focus-within {
   outline: 2px solid #60a5fa;
   outline-offset: 2px;
 }
@@ -538,12 +804,21 @@
   border-color: #16a34a;
   background: rgba(240,253,244,.95);
   color: #166534;
+  padding: 1px 4px;
 }
 
 .ext-field--preview {
   border-color: #16a34a;
   background: rgba(255,255,255,.96);
   color: #166534;
+  padding: 1px 4px;
+}
+
+.ext-field--signature.ext-field--filled,
+.ext-field--signature.ext-field--preview,
+.ext-field--initials.ext-field--filled,
+.ext-field--initials.ext-field--preview {
+  padding: 0 2px;
 }
 
 .ext-field-image {
@@ -551,12 +826,47 @@
   width: 100%;
   height: 100%;
   object-fit: contain;
+  object-position: center;
   pointer-events: none;
 }
 
 .ext-field--checkbox,
 .ext-field--radio {
   padding: 0;
+}
+
+.ext-field--radio {
+  justify-content: flex-start;
+  background: rgba(255,255,255,.96);
+  margin: 0;
+  min-inline-size: 0;
+}
+
+.ext-radio-options {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px;
+  overflow: hidden;
+}
+
+.ext-radio-option {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #1f2937;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.ext-radio-option input {
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: #2563eb;
 }
 
 .ext-field input[type="text"],

@@ -39,7 +39,8 @@ class OllamaProvider extends AIModelProvider {
           // Enable JSON mode only when the model declares schema support
           ...(this._caps.supportsJsonSchema ? { format: 'json' } : {}),
         }),
-        signal: AbortSignal.timeout(45000),
+        // Use the orchestrator's AbortSignal if provided; fall back to 45s guard.
+        signal: input.signal || AbortSignal.timeout(45000),
       });
     } catch (err) {
       if (err.name === 'AbortError' || err.code === 'ECONNREFUSED' || err.name === 'TimeoutError') {

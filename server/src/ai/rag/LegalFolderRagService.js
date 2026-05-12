@@ -3,6 +3,7 @@ const path = require('path');
 const zlib = require('zlib');
 const Document = require('../../models/Document');
 const { documentVisibilityFilter, mergeFilters } = require('../security/DataScope');
+const { AiDataAccessPolicy } = require('../security/AiDataAccessPolicy');
 const { sanitizeRetrievedSnippet } = require('../security/PromptSecurity');
 
 const envInt = (name, fallback, min) => {
@@ -11,7 +12,8 @@ const envInt = (name, fallback, min) => {
   return Math.max(min, parsed);
 };
 
-const MAX_SYNC_DOCUMENTS = envInt('AI_RAG_MAX_SYNC_DOCUMENTS', 500, 1);
+const MAX_SYNC_DOCUMENTS  = envInt('AI_RAG_MAX_SYNC_DOCUMENTS', 500, 1);
+const FILE_TEXT_CACHE_MAX = envInt('AI_RAG_FILE_CACHE_MAX', 200, 10);
 const MAX_SYNC_TEXT_CHARS = envInt('AI_RAG_MAX_SYNC_TEXT_CHARS', 60000, 1000);
 const MAX_SYNC_TOTAL_CHARS = Math.max(MAX_SYNC_TEXT_CHARS, envInt('AI_RAG_MAX_SYNC_TOTAL_CHARS', 3000000, 1000));
 const MAX_CHUNK_CHARS = envInt('AI_RAG_CHUNK_CHARS', 1400, 400);
@@ -53,8 +55,11 @@ const STOP_WORDS = new Set([
 
 const fileExtension = (name = '') => path.extname(name).toLowerCase().replace('.', '');
 
-const readUInt16 = (buffer, offset) => buffer.readUInt16LE(offset);
-const readUInt32 = (buffer, offset) => buffer.readUInt32LE(offset);
+// Safe buffer readers — return 0 instead of throwing RangeError on malformed files
+const readUInt16 = (buffer, offset) =>
+  offset + 2 <= buffer.length ? buffer.readUInt16LE(offset) : 0;
+const readUInt32 = (buffer, offset) =>
+  offset + 4 <= buffer.length ? buffer.readUInt32LE(offset) : 0;
 
 const docxXmlToText = (xml) =>
   decodeXmlEntities(xml)
@@ -88,23 +93,29 @@ const extractDocxText = (filePath) => {
   let cursor = readUInt32(buffer, eocdOffset + 16);
 
   for (let i = 0; i < totalEntries; i += 1) {
+    if (cursor + 46 > buffer.length) break;
     if (readUInt32(buffer, cursor) !== 0x02014b50) break;
 
-    const compression = readUInt16(buffer, cursor + 10);
+    const compression    = readUInt16(buffer, cursor + 10);
     const compressedSize = readUInt32(buffer, cursor + 20);
     const fileNameLength = readUInt16(buffer, cursor + 28);
-    const extraLength = readUInt16(buffer, cursor + 30);
-    const commentLength = readUInt16(buffer, cursor + 32);
+    const extraLength    = readUInt16(buffer, cursor + 30);
+    const commentLength  = readUInt16(buffer, cursor + 32);
     const localHeaderOffset = readUInt32(buffer, cursor + 42);
+
+    if (cursor + 46 + fileNameLength > buffer.length) break;
     const name = buffer.slice(cursor + 46, cursor + 46 + fileNameLength).toString('utf8');
 
-    if (name === 'word/document.xml' && readUInt32(buffer, localHeaderOffset) === 0x04034b50) {
-      const localNameLength = readUInt16(buffer, localHeaderOffset + 26);
+    if (name === 'word/document.xml' && localHeaderOffset + 30 <= buffer.length &&
+        readUInt32(buffer, localHeaderOffset) === 0x04034b50) {
+      const localNameLength  = readUInt16(buffer, localHeaderOffset + 26);
       const localExtraLength = readUInt16(buffer, localHeaderOffset + 28);
       const dataStart = localHeaderOffset + 30 + localNameLength + localExtraLength;
-      const compressed = buffer.slice(dataStart, dataStart + compressedSize);
-      const content = compression === 0 ? compressed : zlib.inflateRawSync(compressed);
-      return docxXmlToText(content.toString('utf8'));
+      if (dataStart + compressedSize <= buffer.length) {
+        const compressed = buffer.slice(dataStart, dataStart + compressedSize);
+        const content = compression === 0 ? compressed : zlib.inflateRawSync(compressed);
+        return docxXmlToText(content.toString('utf8'));
+      }
     }
 
     cursor += 46 + fileNameLength + extraLength + commentLength;
@@ -125,6 +136,7 @@ class LegalFolderRagService {
   constructor() {
     this._userIndexes = new Map();
     this._fileTextCache = new Map();
+    this._policy = new AiDataAccessPolicy();
   }
 
   syncLegalFolder({ userId, source, documents }) {
@@ -164,6 +176,7 @@ class LegalFolderRagService {
         id: String(doc.id || doc._id || doc.sourcePath || doc.name),
         name: String(doc.name || 'Legal Folder document'),
         sourcePath: String(doc.sourcePath || ''),
+        sourceLabel: String(doc.name || 'Legal Folder document'),
         type: String(doc.type || ''),
         status: String(doc.status || ''),
         contractTitle: String(doc.contractTitle || doc.contract?.title || ''),
@@ -198,7 +211,8 @@ class LegalFolderRagService {
     };
   }
 
-  shouldRetrieve(query) {
+  shouldRetrieve(query, user) {
+    if (user !== undefined && !this._policy.canUseDocumentRag(user)) return false;
     return QUERY_HINT.test(query);
   }
 
@@ -224,6 +238,7 @@ class LegalFolderRagService {
   }
 
   async retrieve({ user, query }) {
+    if (!this._policy.canUseDocumentRag(user)) return null;
     const userId = String(user?._id || 'anonymous');
     const tokens = tokenize(query);
     if (tokens.length === 0) return null;
@@ -250,7 +265,9 @@ class LegalFolderRagService {
         documentId: chunk.documentId,
         documentName: chunk.documentName,
         sourcePath: chunk.sourcePath,
+        sourceLabel: chunk.sourceLabel,
         contractTitle: chunk.contractTitle,
+        status: chunk.status,
         snippet: chunk.text,
         securityFlags: chunk.securityFlags || [],
       })),
@@ -263,14 +280,14 @@ class LegalFolderRagService {
     return retrieval.snippets.map((item) => [
       `[${item.id}] Document: ${item.documentName}`,
       item.contractTitle ? `Contract: ${item.contractTitle}` : null,
-      item.sourcePath ? `Source path: ${item.sourcePath}` : null,
+      item.sourceLabel || item.sourcePath ? `Source: ${item.sourceLabel || path.basename(item.sourcePath || '')}` : null,
       item.securityFlags?.length ? `Security note: prompt-like instructions were detected in this excerpt and removed before prompting. Flags: ${item.securityFlags.join(', ')}` : null,
       `Excerpt: ${item.snippet}`,
     ].filter(Boolean).join('\n')).join('\n\n');
   }
 
   _legalFolderFilterForUser(user) {
-    return mergeFilters({ isInLegalFolder: true }, documentVisibilityFilter(user));
+    return mergeFilters({ isInLegalFolder: true, status: { $ne: 'Archived' } }, documentVisibilityFilter(user));
   }
 
   async _retrieveDatabaseChunks(query, tokens, user) {
@@ -321,6 +338,7 @@ class LegalFolderRagService {
         id: String(doc._id),
         name: doc.name,
         sourcePath: doc.legalFolderPath || doc.originalName || doc.name || '',
+        sourceLabel: doc.originalName || doc.name || 'Legal Folder document',
         type: doc.type,
         status: doc.status,
         contractTitle: doc.contract?.title || '',
@@ -343,7 +361,13 @@ class LegalFolderRagService {
     }
 
     const cacheKey = `${doc.path}:${stat.size}:${stat.mtimeMs}`;
-    if (this._fileTextCache.has(cacheKey)) return this._fileTextCache.get(cacheKey);
+    if (this._fileTextCache.has(cacheKey)) {
+      // Re-insert to keep this entry "fresh" (most recently used at the end)
+      const cached = this._fileTextCache.get(cacheKey);
+      this._fileTextCache.delete(cacheKey);
+      this._fileTextCache.set(cacheKey, cached);
+      return cached;
+    }
 
     let text = '';
     const ext = fileExtension(doc.path || doc.originalName || doc.name);
@@ -363,25 +387,23 @@ class LegalFolderRagService {
     }
 
     text = normalizeText(text).slice(0, MAX_SYNC_TEXT_CHARS);
+    // Evict the oldest entry when the cache is full (Map preserves insertion order)
+    if (this._fileTextCache.size >= FILE_TEXT_CACHE_MAX) {
+      this._fileTextCache.delete(this._fileTextCache.keys().next().value);
+    }
     this._fileTextCache.set(cacheKey, text);
     return text;
   }
 
   async _extractPdfText(filePath) {
-    let PDFParse;
+    let pdfParse;
     try {
-      ({ PDFParse } = require('pdf-parse'));
+      pdfParse = require('pdf-parse');
     } catch {
       return '';
     }
-
-    const parser = new PDFParse({ data: fs.readFileSync(filePath) });
-    try {
-      const data = await parser.getText();
-      return data.text || '';
-    } finally {
-      await parser.destroy();
-    }
+    const data = await pdfParse(fs.readFileSync(filePath));
+    return data.text || '';
   }
 
   _chunkDocument(doc) {
@@ -400,6 +422,7 @@ class LegalFolderRagService {
           documentId: doc.id,
           documentName: doc.name,
           sourcePath: doc.sourcePath,
+          sourceLabel: doc.sourceLabel || path.basename(doc.sourcePath || '') || doc.name,
           type: doc.type,
           status: doc.status,
           contractTitle: doc.contractTitle,

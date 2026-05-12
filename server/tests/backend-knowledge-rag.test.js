@@ -11,7 +11,7 @@ const writeFile = (filePath, content) => {
   fs.writeFileSync(filePath, content);
 };
 
-test('BackendKnowledgeRagService indexes public route summaries without indexing .env', async () => {
+test('BackendKnowledgeRagService indexes curated help without exposing route summaries to managers', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-rag-'));
   writeFile(path.join(root, '.env'), 'JWT_SECRET=do-not-index-this');
   writeFile(path.join(root, 'src/routes/auth.js'), `
@@ -21,6 +21,13 @@ test('BackendKnowledgeRagService indexes public route summaries without indexing
     router.get('/me', async () => {});
     module.exports = router;
   `);
+  writeFile(path.join(root, 'src/ai/config/legalWorkflowSla.js'), `
+    module.exports = {
+      INTERNAL_TURNAROUND_DAYS: 4,
+      EXTERNAL_TURNAROUND_DAYS: 7,
+      SIGNATURE_REMINDER_DAYS: 2,
+    };
+  `);
 
   const service = new BackendKnowledgeRagService({
     rootDir: root,
@@ -28,25 +35,28 @@ test('BackendKnowledgeRagService indexes public route summaries without indexing
     includeSource: false,
   });
 
-  const index = service.reindex();
+  // reindex() is async — must be awaited
+  const index = await service.reindex();
   assert.equal(index.files.some((file) => file.includes('.env')), false);
 
+  // Manager role gets curated help, not route internals.
   const result = await service.retrieve({
-    user: { role: 'staff' },
-    query: 'Which authentication API endpoints exist?',
+    user: { role: 'manager' },
+    query: 'What workflow SLA thresholds exist?',
   });
 
   const context = service.formatContext(result);
-  assert.match(context, /POST \/login/);
-  assert.match(context, /GET \/me/);
+  assert.match(context, /INTERNAL_TURNAROUND_DAYS=4/);
   assert.doesNotMatch(context, /do-not-index-this/);
-  assert.equal(result.snippets.every((snippet) => snippet.audience === 'public'), true);
+  assert.doesNotMatch(context, /POST \/login/);
+  assert.equal(result.snippets.every((snippet) => snippet.audience === 'help'), true);
 });
 
 test('BackendKnowledgeRagService does not trigger on ordinary contract data questions', () => {
   const service = new BackendKnowledgeRagService();
   assert.equal(service.shouldRetrieve('Search for the NDA contract'), false);
   assert.equal(service.shouldRetrieve('What fields are on the contract schema?'), true);
+  assert.equal(service.shouldRetrieve('Show backend routes', { role: 'external' }), false);
 });
 
 test('BackendKnowledgeRagService keeps sanitized source chunks internal-only', async () => {
@@ -78,5 +88,34 @@ test('BackendKnowledgeRagService keeps sanitized source chunks internal-only', a
   assert.match(context, /implementationDetailForAdmins/);
   assert.match(context, /\[redacted-secret\]/);
   assert.doesNotMatch(context, /1234567890abcdef/);
-  assert.equal(adminResult.snippets.some((snippet) => snippet.audience === 'internal'), true);
+  assert.equal(adminResult.snippets.some((snippet) => snippet.audience === 'source'), true);
+});
+
+test('BackendKnowledgeRagService allows staff help but not source code', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-rag-'));
+  writeFile(path.join(root, 'src/ai/config/legalWorkflowSla.js'), `
+    module.exports = { INTERNAL_TURNAROUND_DAYS: 4 };
+  `);
+  writeFile(path.join(root, 'src/services/demoService.js'), `
+    const implementationOnly = 'sourceOnlyMarker';
+    module.exports = { implementationOnly };
+  `);
+
+  const service = new BackendKnowledgeRagService({
+    rootDir: root,
+    sourceDirs: ['src'],
+    includeSource: true,
+  });
+
+  const help = await service.retrieve({
+    user: { role: 'staff' },
+    query: 'internal turnaround days workflow SLA',
+  });
+  assert.equal(help.snippets.every((snippet) => snippet.audience === 'help'), true);
+
+  const source = await service.retrieve({
+    user: { role: 'staff' },
+    query: 'sourceOnlyMarker implementation',
+  });
+  assert.equal(source, null);
 });

@@ -31,6 +31,81 @@ const ROLES = [
   'Witness', 'Director', 'Company Secretary', 'Other',
 ];
 
+const TRAIL_OPTIONS = [
+  {
+    value: 'standard',
+    title: 'Default audit trail',
+    desc: 'Records the current identity, consent, device, IP, timestamp, field, and document hash evidence.',
+  },
+  {
+    value: 'photo',
+    title: 'Picture',
+    desc: 'Captures a still photo from the signer camera when they start signing externally.',
+  },
+  {
+    value: 'video',
+    title: 'Video',
+    desc: 'Records camera video from the first external signing action until the signer previews the signature.',
+  },
+  {
+    value: 'ron',
+    title: 'Remote Online Notarization (RON)',
+    desc: 'Requires a notary profile, signer identity proofing, camera/microphone readiness, audio/video evidence, and RON journal metadata.',
+  },
+];
+
+// South African identity proofing methods (no KBA in SA law)
+const RON_IDENTITY_OPTIONS = [
+  {
+    value: 'sa_id_document',
+    label: 'SA ID Document',
+    desc: 'Signer uploads their South African ID book or smart ID card for visual verification by the notary.',
+  },
+  {
+    value: 'passport_document',
+    label: 'Passport',
+    desc: 'Signer uploads a valid passport for visual verification before the notarial session.',
+  },
+  {
+    value: 'personal_knowledge',
+    label: 'Personal knowledge',
+    desc: 'The Notary Public personally knows and can identify the signer (attestation required in the journal).',
+  },
+];
+
+const SA_PROVINCES = [
+  { code: 'GP', name: 'Gauteng' },
+  { code: 'WC', name: 'Western Cape' },
+  { code: 'KZN', name: 'KwaZulu-Natal' },
+  { code: 'EC', name: 'Eastern Cape' },
+  { code: 'FS', name: 'Free State' },
+  { code: 'LP', name: 'Limpopo' },
+  { code: 'MP', name: 'Mpumalanga' },
+  { code: 'NC', name: 'Northern Cape' },
+  { code: 'NW', name: 'North West' },
+];
+
+const SA_DOCUMENT_TYPES = [
+  { value: 'antenuptial_contract', label: 'Antenuptial Contract (ANC)' },
+  { value: 'power_of_attorney', label: 'Power of Attorney' },
+  { value: 'affidavit', label: 'Sworn Affidavit / Declaration' },
+  { value: 'academic_transcript', label: 'Academic Transcript / Diploma' },
+  { value: 'property_agreement', label: 'Property / Financial Agreement' },
+  { value: 'other', label: 'Other Notarial Document' },
+];
+
+const emptyRonConfig = () => ({
+  identityMethod: 'sa_id_document',
+  notary: {
+    name: '',
+    email: '',
+    province: '',
+    admissionNumber: '',
+    commissionExpiresAt: '',
+    venue: '',
+  },
+});
+
 const uid = () => `f_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 const isMongoId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
 const isPdfRecord = (record) =>
@@ -116,6 +191,467 @@ const docxPageVars = (metric = PAGE_FALLBACK) => ({
   '--docx-margin-bottom': `${finiteMetric(metric.marginBottom, 96)}px`,
   '--docx-margin-left': `${finiteMetric(metric.marginLeft, 96)}px`,
 });
+
+const FIELD_TYPE_PRIORITY = {
+  signature: 50,
+  initials: 45,
+  date: 40,
+  dropdown: 35,
+  checkbox: 35,
+  radio: 35,
+  number: 35,
+  text: 10,
+};
+const GENERAL_OVERLAP_LIMIT = 0.42;
+const TEXT_OVERLAP_LIMIT = 0.18;
+const FIELD_ALIGNMENT_GROUP_DISTANCE = 0.09;
+const FIELD_ALIGNMENT_TOLERANCE = 0.0035;
+const FIELD_ALIGNMENT_SNAP_DISTANCE = 0.018;
+const INITIALS_ALIGNMENT_TOLERANCE = 0.001;
+
+const fieldLayoutPriority = (field) => FIELD_TYPE_PRIORITY[field?.type] || 20;
+
+const fieldSignerKey = (field = {}) =>
+  field.assignedTo || field.role || 'unassigned';
+
+const normalizedRect = (field, pageMetrics) => {
+  const metric = pageMetric(pageMetrics, field.page);
+  const geometry = toNormalizedGeometry(field, metric);
+  return {
+    ...geometry,
+    page: Number(field.page || 1),
+    right: geometry.x + geometry.width,
+    bottom: geometry.y + geometry.height,
+    area: geometry.width * geometry.height,
+  };
+};
+
+const overlapStats = (a, b, pageMetrics) => {
+  const ar = normalizedRect(a, pageMetrics);
+  const br = normalizedRect(b, pageMetrics);
+  if (ar.page !== br.page) return null;
+  const width = Math.min(ar.right, br.right) - Math.max(ar.x, br.x);
+  const height = Math.min(ar.bottom, br.bottom) - Math.max(ar.y, br.y);
+  if (width <= 0 || height <= 0) return null;
+  const area = width * height;
+  const aRatio = area / Math.max(ar.area, 0.000001);
+  const bRatio = area / Math.max(br.area, 0.000001);
+  return {
+    area,
+    aRatio,
+    bRatio,
+    smallerRatio: area / Math.max(Math.min(ar.area, br.area), 0.000001),
+  };
+};
+
+const shouldFlagOverlap = (a, b, stats) => {
+  if (!stats) return false;
+  if (stats.smallerRatio >= GENERAL_OVERLAP_LIMIT) return true;
+  if (a.type === 'text' && stats.aRatio >= TEXT_OVERLAP_LIMIT) return true;
+  if (b.type === 'text' && stats.bRatio >= TEXT_OVERLAP_LIMIT) return true;
+  return false;
+};
+
+const preferredField = (a, b) => {
+  const priorityDelta = fieldLayoutPriority(a) - fieldLayoutPriority(b);
+  if (priorityDelta !== 0) return priorityDelta > 0 ? a : b;
+  const confidenceDelta = Number(a.confidence || 0) - Number(b.confidence || 0);
+  if (Math.abs(confidenceDelta) > 0.001) return confidenceDelta >= 0 ? a : b;
+  return a;
+};
+
+const findFieldOverlapIssues = (fields = [], pageMetrics = { 1: PAGE_FALLBACK }) => {
+  const issues = [];
+  for (let i = 0; i < fields.length; i += 1) {
+    for (let j = i + 1; j < fields.length; j += 1) {
+      const stats = overlapStats(fields[i], fields[j], pageMetrics);
+      if (!shouldFlagOverlap(fields[i], fields[j], stats)) continue;
+      issues.push({ a: fields[i], b: fields[j], stats });
+    }
+  }
+  return issues;
+};
+
+const sanitizeOverlappedTextFields = (fields = [], pageMetrics = { 1: PAGE_FALLBACK }) => {
+  let next = [...fields];
+  const removed = [];
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < next.length && !changed; i += 1) {
+      for (let j = i + 1; j < next.length && !changed; j += 1) {
+        const a = next[i];
+        const b = next[j];
+        const stats = overlapStats(a, b, pageMetrics);
+        if (!stats) continue;
+
+        let remove = null;
+        let keep = null;
+        if (a.type === 'text' && b.type === 'text' && stats.smallerRatio >= TEXT_OVERLAP_LIMIT) {
+          keep = preferredField(a, b);
+          remove = keep.id === a.id ? b : a;
+        } else if (a.type === 'text' && stats.aRatio >= TEXT_OVERLAP_LIMIT) {
+          remove = a;
+          keep = b;
+        } else if (b.type === 'text' && stats.bRatio >= TEXT_OVERLAP_LIMIT) {
+          remove = b;
+          keep = a;
+        }
+
+        if (remove) {
+          removed.push({ removed: remove, kept: keep });
+          next = next.filter((field) => field.id !== remove.id);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  return { fields: next, removed, issues: findFieldOverlapIssues(next, pageMetrics) };
+};
+
+const median = (values = []) => {
+  const sorted = values.filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+};
+
+const guideAxisForEdge = (edge) =>
+  edge === 'top' || edge === 'bottom' ? 'horizontal' : 'vertical';
+
+const fieldEdgeValue = (entry, edge) => {
+  if (edge === 'right') return entry.rect.right;
+  if (edge === 'top') return entry.rect.y;
+  if (edge === 'bottom') return entry.rect.bottom;
+  return entry.rect.x;
+};
+
+const fieldAlignmentTarget = (items = [], edge = 'left', activeFieldId = null) => {
+  const anchors = activeFieldId && items.length > 1
+    ? items.filter((entry) => entry.field.id !== activeFieldId)
+    : items;
+
+  if (anchors.length === 1) return fieldEdgeValue(anchors[0], edge);
+
+  return median(anchors.map((entry) => fieldEdgeValue(entry, edge)));
+};
+
+const fieldAlignmentGuideBounds = (items = [], axis = 'vertical') => {
+  if (axis === 'horizontal') {
+    const left = Math.max(0, Math.min(...items.map((entry) => entry.rect.x)) - FIELD_ALIGNMENT_SNAP_DISTANCE);
+    const right = Math.min(1, Math.max(...items.map((entry) => entry.rect.right)) + FIELD_ALIGNMENT_SNAP_DISTANCE);
+    return {
+      left,
+      width: Math.max(0.04, right - left),
+    };
+  }
+
+  const top = Math.max(0, Math.min(...items.map((entry) => entry.rect.y)) - FIELD_ALIGNMENT_SNAP_DISTANCE);
+  const bottom = Math.min(1, Math.max(...items.map((entry) => entry.rect.bottom)) + FIELD_ALIGNMENT_SNAP_DISTANCE);
+  return {
+    top,
+    height: Math.max(0.04, bottom - top),
+  };
+};
+
+const fieldAlignmentClusters = (items = [], edge = 'left') => {
+  const clusters = [];
+  [...items]
+    .sort((a, b) => fieldEdgeValue(a, edge) - fieldEdgeValue(b, edge))
+    .forEach((item) => {
+      const value = fieldEdgeValue(item, edge);
+      const cluster = clusters.find((candidate) =>
+        Math.abs(candidate.anchor - value) <= FIELD_ALIGNMENT_GROUP_DISTANCE
+      );
+      if (cluster) {
+        cluster.items.push(item);
+        cluster.anchor = median(cluster.items.map((entry) => fieldEdgeValue(entry, edge)));
+      } else {
+        clusters.push({ anchor: value, items: [item] });
+      }
+    });
+  return clusters;
+};
+
+const findFieldAlignmentGuides = (fields = [], pageMetrics = { 1: PAGE_FALLBACK }, activeFieldId = null) => {
+  const activeField = fields.find((field) => field.id === activeFieldId);
+  const activeSignerKey = activeField ? fieldSignerKey(activeField) : null;
+  const edges = activeField?.type === 'initials'
+    ? ['left', 'right', 'top', 'bottom']
+    : ['left', 'right'];
+  const groupsBySigner = new Map();
+
+  fields
+    .forEach((field) => {
+      if (activeSignerKey && fieldSignerKey(field) !== activeSignerKey) return;
+      const rect = normalizedRect(field, pageMetrics);
+      const key = fieldSignerKey(field);
+      if (!groupsBySigner.has(key)) groupsBySigner.set(key, []);
+      groupsBySigner.get(key).push({ field, rect });
+    });
+
+  const issues = [];
+  const guidesByPage = new Map();
+
+  for (const groupFields of groupsBySigner.values()) {
+    edges.forEach((edge) => {
+      const axis = guideAxisForEdge(edge);
+      const candidates = axis === 'horizontal'
+        ? groupFields.filter((entry) => entry.field.type === 'initials')
+        : groupFields;
+
+      fieldAlignmentClusters(candidates, edge)
+        .filter((cluster) => cluster.items.length >= 2)
+        .forEach((cluster) => {
+          const target = fieldAlignmentTarget(cluster.items, edge, activeFieldId);
+          const misaligned = cluster.items.filter((entry) =>
+            Math.abs(fieldEdgeValue(entry, edge) - target) > FIELD_ALIGNMENT_TOLERANCE
+          );
+          const status = misaligned.length ? 'warning' : 'aligned';
+          const pages = [...new Set(cluster.items.map((entry) => entry.rect.page))];
+
+          pages.forEach((page) => {
+            const pageItems = cluster.items.filter((entry) => entry.rect.page === page);
+            const bounds = fieldAlignmentGuideBounds(pageItems, axis);
+            const guide = {
+              page,
+              axis,
+              edge,
+              value: target,
+              ...bounds,
+              status,
+              ids: cluster.items.map((entry) => entry.field.id),
+            };
+            if (!guidesByPage.has(page)) guidesByPage.set(page, []);
+            guidesByPage.get(page).push(guide);
+          });
+
+          misaligned.forEach((entry) => {
+            issues.push({
+              field: entry.field,
+              edge,
+              delta: fieldEdgeValue(entry, edge) - target,
+            });
+          });
+        });
+    });
+  }
+
+  return { issues, guidesByPage };
+};
+
+const roundFieldGeometry = (geometry) => ({
+  ...geometry,
+  x: Number(geometry.x.toFixed(6)),
+  y: Number(geometry.y.toFixed(6)),
+  width: Number(geometry.width.toFixed(6)),
+  height: Number(geometry.height.toFixed(6)),
+});
+
+const fieldSnapTargets = (field, fields = [], pageMetrics = { 1: PAGE_FALLBACK }) => {
+  const signerKey = fieldSignerKey(field);
+
+  return fields
+    .filter((candidate) =>
+      candidate.id !== field.id &&
+      fieldSignerKey(candidate) === signerKey
+    )
+    .flatMap((candidate) => {
+      const rect = normalizedRect(candidate, pageMetrics);
+      const targets = [
+        { side: 'left', x: rect.x },
+        { side: 'right', x: rect.right },
+      ];
+      if (field.type === 'initials' && candidate.type === 'initials') {
+        targets.push(
+          { side: 'top', y: rect.y },
+          { side: 'bottom', y: rect.bottom }
+        );
+      }
+      return targets;
+    });
+};
+
+const snapFieldGeometry = (field, geometry, fields = [], pageMetrics = { 1: PAGE_FALLBACK }, mode = 'move') => {
+  const targets = fieldSnapTargets(field, fields, pageMetrics);
+  if (!targets.length) return roundFieldGeometry(geometry);
+
+  const current = {
+    ...geometry,
+    x: clamp(geometry.x, 0, 1 - geometry.width),
+    y: clamp(geometry.y, 0, 1 - geometry.height),
+    width: clamp(geometry.width, 0.018, 1),
+    height: clamp(geometry.height, 0.018, 1),
+  };
+  current.width = clamp(current.width, 0.018, 1 - current.x);
+  current.height = clamp(current.height, 0.018, 1 - current.y);
+
+  let bestX = null;
+  let bestY = null;
+
+  const consider = (side, targetX, nextGeometry) => {
+    const distance = Math.abs((side === 'right' ? current.x + current.width : current.x) - targetX);
+    if (distance > FIELD_ALIGNMENT_SNAP_DISTANCE) return;
+    if (!bestX || distance < bestX.distance) bestX = { distance, geometry: nextGeometry };
+  };
+
+  const considerY = (side, targetY, nextGeometry) => {
+    const distance = Math.abs((side === 'bottom' ? current.y + current.height : current.y) - targetY);
+    if (distance > FIELD_ALIGNMENT_SNAP_DISTANCE) return;
+    if (!bestY || distance < bestY.distance) bestY = { distance, geometry: nextGeometry };
+  };
+
+  for (const target of targets) {
+    if (mode === 'resize') {
+      if (target.side === 'right') {
+        const width = target.x - current.x;
+        if (width >= 0.018 && current.x + width <= 1) {
+          consider('right', target.x, { ...current, width });
+        }
+      } else if (target.side === 'bottom') {
+        const height = target.y - current.y;
+        if (height >= 0.018 && current.y + height <= 1) {
+          considerY('bottom', target.y, { ...current, height });
+        }
+      }
+      continue;
+    }
+
+    if (target.side === 'left') {
+      consider('left', target.x, {
+        ...current,
+        x: clamp(target.x, 0, 1 - current.width),
+      });
+    } else if (target.side === 'right') {
+      const snappedX = target.x - current.width;
+      if (snappedX < 0 || snappedX > 1 - current.width) continue;
+      consider('right', target.x, {
+        ...current,
+        x: snappedX,
+      });
+    } else if (target.side === 'top') {
+      considerY('top', target.y, {
+        ...current,
+        y: clamp(target.y, 0, 1 - current.height),
+      });
+    } else if (target.side === 'bottom') {
+      const snappedY = target.y - current.height;
+      if (snappedY < 0 || snappedY > 1 - current.height) continue;
+      considerY('bottom', target.y, {
+        ...current,
+        y: snappedY,
+      });
+    }
+  }
+
+  const snapped = { ...current };
+  if (bestX?.geometry) {
+    snapped.x = bestX.geometry.x;
+    snapped.width = bestX.geometry.width;
+  }
+  if (bestY?.geometry) {
+    snapped.y = bestY.geometry.y;
+    snapped.height = bestY.geometry.height;
+  }
+
+  return roundFieldGeometry(snapped);
+};
+
+const normalizedGeometryPatch = (field, pageMetrics, target) => {
+  const metric = pageMetric(pageMetrics, field.page);
+  const current = toNormalizedGeometry(field, metric);
+  const next = {
+    x: Number(clamp(target.x, 0, 1 - current.width).toFixed(6)),
+    y: Number(clamp(target.y, 0, 1 - current.height).toFixed(6)),
+    width: Number(clamp(target.width ?? current.width, 0.015, 1).toFixed(6)),
+    height: Number(clamp(target.height ?? current.height, 0.015, 1).toFixed(6)),
+  };
+
+  next.x = Number(clamp(next.x, 0, 1 - next.width).toFixed(6));
+  next.y = Number(clamp(next.y, 0, 1 - next.height).toFixed(6));
+
+  if (
+    Math.abs(current.x - next.x) <= INITIALS_ALIGNMENT_TOLERANCE &&
+    Math.abs(current.y - next.y) <= INITIALS_ALIGNMENT_TOLERANCE &&
+    Math.abs(current.width - next.width) <= INITIALS_ALIGNMENT_TOLERANCE &&
+    Math.abs(current.height - next.height) <= INITIALS_ALIGNMENT_TOLERANCE &&
+    field.coordinateOrigin === 'normalized'
+  ) {
+    return field;
+  }
+
+  return {
+    ...field,
+    ...next,
+    coordinateOrigin: 'normalized',
+  };
+};
+
+const alignInitialsToPreviousPages = (fields = [], pageMetrics = { 1: PAGE_FALLBACK }, changedFieldId = null) => {
+  const initials = fields.filter((field) => field.type === 'initials');
+  if (initials.length < 2) return fields;
+
+  const bySigner = new Map();
+  initials.forEach((field) => {
+    const key = fieldSignerKey(field);
+    if (!bySigner.has(key)) bySigner.set(key, []);
+    bySigner.get(key).push(field);
+  });
+
+  const replacements = new Map();
+
+  for (const group of bySigner.values()) {
+    const ordered = [...group].sort((a, b) => {
+      const ap = Number(a.page || 1);
+      const bp = Number(b.page || 1);
+      if (ap !== bp) return ap - bp;
+      const ag = toNormalizedGeometry(a, pageMetric(pageMetrics, ap));
+      const bg = toNormalizedGeometry(b, pageMetric(pageMetrics, bp));
+      return ag.y - bg.y || ag.x - bg.x;
+    });
+
+    let previousPage = null;
+    let previousGeometry = null;
+    for (const field of ordered) {
+      const page = Number(field.page || 1);
+      const current = replacements.get(field.id) || field;
+      const currentGeometry = toNormalizedGeometry(current, pageMetric(pageMetrics, page));
+
+      if (previousGeometry && page !== previousPage) {
+        const shouldAlign =
+          !changedFieldId ||
+          field.id === changedFieldId ||
+          ordered.some((candidate) => candidate.id === changedFieldId && Number(candidate.page || 1) <= page);
+
+        if (shouldAlign) {
+          const aligned = normalizedGeometryPatch(current, pageMetrics, previousGeometry);
+          replacements.set(field.id, aligned);
+          previousGeometry = toNormalizedGeometry(aligned, pageMetric(pageMetrics, page));
+        } else {
+          previousGeometry = currentGeometry;
+        }
+      } else {
+        previousGeometry = currentGeometry;
+      }
+
+      previousPage = page;
+    }
+  }
+
+  if (!replacements.size) return fields;
+
+  let changed = false;
+  const next = fields.map((field) => {
+    const replacement = replacements.get(field.id);
+    if (!replacement || replacement === field) return field;
+    changed = true;
+    return replacement;
+  });
+
+  return changed ? next : fields;
+};
 
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -247,11 +783,34 @@ export default function SigningEnvelope() {
   const [activeSi, setActiveSi] = useState(0);
   const [signingOrder, setSigningOrder] = useState('parallel');
   const [message, setMessage] = useState('');
+  const [evidenceMode, setEvidenceMode] = useState(() => doc?.signingEvidence?.mode || 'standard');
+  const [ronConfig, setRonConfig] = useState(() => ({
+    ...emptyRonConfig(),
+    ...(doc?.signingEvidence?.ron || {}),
+    notary: {
+      ...emptyRonConfig().notary,
+      ...(doc?.signingEvidence?.ron?.notary || {}),
+    },
+  }));
+  const [ronActionBusy, setRonActionBusy] = useState('');
+  const [ronRecordingReference, setRonRecordingReference] = useState('');
+  const [ronRecordingFile, setRonRecordingFile] = useState(null);
+  const [ronStampFile, setRonStampFile] = useState(null);
+  const [ronStampUploading, setRonStampUploading] = useState(false);
+  const [saDocumentType, setSaDocumentType] = useState(() => doc?.signingEvidence?.saDocumentType || '');
+  const [apostilleRequired, setApostilleRequired] = useState(() => Boolean(doc?.signingEvidence?.apostilleRequired));
+  const [sessionSchedule, setSessionSchedule] = useState('immediate'); // 'immediate' | 'scheduled'
+  const [scheduledAt, setScheduledAt] = useState(() => {
+    const raw = doc?.signingEvidence?.scheduledAt || doc?.signingEvidence?.ron?.session?.scheduledAt;
+    return raw ? new Date(raw).toISOString().slice(0, 16) : '';
+  });
+  const [trailOpen, setTrailOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [prepSummary, setPrepSummary] = useState(null);
   const [error, setError] = useState('');
   const [devPreview, setDevPreview] = useState(null);
+  const [activeGuideFieldId, setActiveGuideFieldId] = useState(null);
 
   const canvasWrapRef = useRef(null);
   const docxMeasureRef = useRef(null);
@@ -267,14 +826,122 @@ export default function SigningEnvelope() {
     const nextFields = initFields(doc);
     setSigners(initSigners(doc));
     setFields(nextFields);
+    setEvidenceMode(doc.signingEvidence?.mode || 'standard');
+    setRonConfig({
+      ...emptyRonConfig(),
+      ...(doc.signingEvidence?.ron || {}),
+      notary: {
+        ...emptyRonConfig().notary,
+        ...(doc.signingEvidence?.ron?.notary || {}),
+      },
+    });
     setStep(initialEnvelopeStep(envelopeMode, nextFields));
   }, [docId, doc, envelopeMode]);
 
   const selField = fields.find((f) => f.id === selId) ?? null;
-  const canStep1 = signers.length > 0 && signers.every((s) => s.email && s.name);
+  const ronMissingFields = useMemo(() => {
+    if (evidenceMode !== 'ron') return [];
+    const notary = ronConfig.notary || {};
+    const required = [
+      ['notary full name', notary.name],
+      ['notary email', notary.email],
+      ['High Court province', notary.province],
+      ['admission or commission number', notary.admissionNumber],
+      ['commission expiration date', notary.commissionExpiresAt],
+      ['notarial venue or city', notary.venue],
+    ];
+    return required.filter(([, value]) => !String(value || '').trim()).map(([label]) => label);
+  }, [evidenceMode, ronConfig]);
+  const canStep1 = signers.length > 0 && signers.every((s) => s.email && s.name) && ronMissingFields.length === 0;
   const previewKind = pdfBlob ? 'pdf' : docxHtml ? 'docx' : fileRecord?.blob ? 'file' : 'none';
-  const canProceedFromFields = fields.length > 0 && fields.every((field) => field.assignedTo);
+  const fieldOverlapIssues = useMemo(() => findFieldOverlapIssues(fields, pageMetrics), [fields, pageMetrics]);
+  const overlappingFieldIds = useMemo(
+    () => new Set(fieldOverlapIssues.flatMap((issue) => [issue.a.id, issue.b.id])),
+    [fieldOverlapIssues],
+  );
+  const fieldAlignment = useMemo(
+    () => activeGuideFieldId
+      ? findFieldAlignmentGuides(fields, pageMetrics, activeGuideFieldId)
+      : { issues: [], guidesByPage: new Map() },
+    [activeGuideFieldId, fields, pageMetrics],
+  );
+  const misalignedGuideFieldIds = useMemo(
+    () => new Set(fieldAlignment.issues.map((issue) => issue.field.id)),
+    [fieldAlignment],
+  );
+  const canProceedFromFields = fields.length > 0 && fields.every((field) => field.assignedTo) && fieldOverlapIssues.length === 0;
   const docxMetric = docxHtml?.metrics || PAGE_FALLBACK;
+  const selectedTrailOption = TRAIL_OPTIONS.find((option) => option.value === evidenceMode) || TRAIL_OPTIONS[0];
+  const selectedRonIdentity = RON_IDENTITY_OPTIONS.find((option) => option.value === ronConfig.identityMethod) || RON_IDENTITY_OPTIONS[0];
+  const ronSession = doc?.signingEvidence?.ron?.session || ronConfig.session || null;
+  const ronIdentityRecords = Array.isArray(doc?.signingEvidence?.ron?.identity?.signers)
+    ? doc.signingEvidence.ron.identity.signers
+    : Object.values(doc?.signingEvidence?.ron?.identity?.signers || {});
+
+  const updateRonNotary = (key, value) => {
+    setRonConfig((current) => ({
+      ...current,
+      notary: {
+        ...(current.notary || {}),
+        [key]: value,
+      },
+    }));
+  };
+
+  const updateRonSession = async (action, payload = {}) => {
+    if (!isMongoId(docId)) {
+      setError('Save this document to the signing system before starting a RON session.');
+      return;
+    }
+    setError('');
+    setRonActionBusy(action);
+    try {
+      const result = await signingApi.ronSession(docId, { action, ...payload });
+      setRemoteDoc((current) => ({
+        ...(current || doc || {}),
+        signingEvidence: result.signingEvidence || current?.signingEvidence || doc?.signingEvidence,
+      }));
+      setRonConfig((current) => ({
+        ...current,
+        ...(result.signingEvidence?.ron || {}),
+        notary: {
+          ...(current.notary || {}),
+          ...(result.signingEvidence?.ron?.notary || {}),
+        },
+      }));
+    } catch (err) {
+      setError(err.message || 'Could not update the RON session.');
+    } finally {
+      setRonActionBusy('');
+    }
+  };
+
+  const uploadRonRecording = async () => {
+    if (!ronRecordingFile) {
+      setError('Choose the RON session recording file first.');
+      return;
+    }
+    if (!isMongoId(docId)) {
+      setError('Save this document to the signing system before storing a RON recording.');
+      return;
+    }
+    setError('');
+    setRonActionBusy('recording');
+    try {
+      const formData = new FormData();
+      formData.append('recording', ronRecordingFile);
+      const result = await signingApi.ronRecording(docId, formData);
+      setRemoteDoc((current) => ({
+        ...(current || doc || {}),
+        signingEvidence: result.signingEvidence || current?.signingEvidence || doc?.signingEvidence,
+      }));
+      setRonRecordingFile(null);
+    } catch (err) {
+      setError(err.message || 'Could not store the RON recording.');
+    } finally {
+      setRonActionBusy('');
+    }
+  };
 
   useLayoutEffect(() => {
     if (step !== 2 || previewKind !== 'docx' || !docxHtml?.html || !docxMeasureRef.current) return undefined;
@@ -429,15 +1096,15 @@ export default function SigningEnvelope() {
       ? clamp((wrapRect.top + wrapRect.height * 0.42 - pageRect.top) / pageRect.height, 0.08, 0.92)
       : 0.45;
     const id = uid();
-    setFields((f) => [
+    setFields((f) => alignInitialsToPreviousPages([
       ...f,
       {
         ...createField({ type: ft.type, signer, page: activePage, x, y }),
         id,
       },
-    ]);
+    ], pageMetrics, id));
     setSelId(id);
-  }, [signers, activeSi, activePage]);
+  }, [signers, activeSi, activePage, pageMetrics]);
 
   const addFieldAtPoint = useCallback((ft, clientX, clientY) => {
     const pageEl = pageElementFromPoint(clientX, clientY);
@@ -447,7 +1114,7 @@ export default function SigningEnvelope() {
     const dropped = geometryFromPoint(clientX, clientY, base, pageEl);
     if (!dropped) return;
     const id = uid();
-    setFields((current) => [
+    setFields((current) => alignInitialsToPreviousPages([
       ...current,
       {
         ...base,
@@ -455,10 +1122,10 @@ export default function SigningEnvelope() {
         id,
         coordinateOrigin: 'normalized',
       },
-    ]);
+    ], pageMetrics, id));
     setActivePage(dropped.page);
     setSelId(id);
-  }, [activeSi, geometryFromPoint, pageElementFromPoint, signers]);
+  }, [activeSi, geometryFromPoint, pageElementFromPoint, pageMetrics, signers]);
 
   const onPaletteDragStart = useCallback((event, ft) => {
     event.dataTransfer.effectAllowed = 'copy';
@@ -503,6 +1170,7 @@ export default function SigningEnvelope() {
     const pageRect = pageEl?.getBoundingClientRect();
     const field = fields.find((item) => item.id === fieldId);
     if (!pageRect || !field) return;
+    setActiveGuideFieldId(fieldId);
     const metric = pageMetric(pageMetrics, field.page);
     const geometry = toNormalizedGeometry(field, metric);
     const pointerOffset = {
@@ -527,18 +1195,28 @@ export default function SigningEnvelope() {
       if (!d) return;
       const dx = (ev.clientX - d.sx) / d.pageWidth;
       const dy = (ev.clientY - d.sy) / d.pageHeight;
-      setFields((prev) =>
-        prev.map((f) => {
+      setFields((prev) => {
+        const moved = prev.map((f) => {
           if (f.id !== d.fieldId) return f;
           if (d.mode === 'resize') {
             const width = clamp(d.start.width + dx, 0.018, 1 - d.start.x);
             const height = clamp(d.start.height + dy, 0.018, 1 - d.start.y);
+            const next = snapFieldGeometry(
+              f,
+              {
+                page: f.page,
+                x: d.start.x,
+                y: d.start.y,
+                width,
+                height,
+              },
+              prev,
+              pageMetrics,
+              'resize'
+            );
             return {
               ...f,
-              x: d.start.x,
-              y: d.start.y,
-              width: Number(width.toFixed(6)),
-              height: Number(height.toFixed(6)),
+              ...next,
               coordinateOrigin: 'normalized',
             };
           }
@@ -560,38 +1238,66 @@ export default function SigningEnvelope() {
               d.pointerOffset
             );
             if (next) {
-              setActivePage(next.page);
-              return {
+              const movingField = {
                 ...f,
                 page: next.page,
-                x: next.x,
-                y: next.y,
                 width: d.start.width,
                 height: d.start.height,
                 coordinateOrigin: 'normalized',
               };
+              const snapped = snapFieldGeometry(
+                movingField,
+                {
+                  ...next,
+                  width: d.start.width,
+                  height: d.start.height,
+                },
+                prev,
+                pageMetrics,
+                'move'
+              );
+              setActivePage(next.page);
+              return {
+                ...f,
+                ...snapped,
+                coordinateOrigin: 'normalized',
+              };
             }
           }
+          const next = snapFieldGeometry(
+            f,
+            {
+              page: f.page,
+              x: clamp(d.start.x + dx, 0, 1 - d.start.width),
+              y: clamp(d.start.y + dy, 0, 1 - d.start.height),
+              width: d.start.width,
+              height: d.start.height,
+            },
+            prev,
+            pageMetrics,
+            'move'
+          );
           return {
             ...f,
-            x: Number(clamp(d.start.x + dx, 0, 1 - d.start.width).toFixed(6)),
-            y: Number(clamp(d.start.y + dy, 0, 1 - d.start.height).toFixed(6)),
-            width: d.start.width,
-            height: d.start.height,
+            ...next,
             coordinateOrigin: 'normalized',
           };
-        }),
-      );
+        });
+        return moved;
+      });
     };
 
     const onUp = () => {
       dragRef.current = null;
+      setActiveGuideFieldId(null);
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
     };
 
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
   }, [fields, geometryFromPoint, pageElementFromPoint, pageMetrics]);
 
   // ── Automated preparation ─────────────────────────────────────────────────
@@ -614,7 +1320,10 @@ export default function SigningEnvelope() {
   const prepareEnvelopeFields = async () => {
     setError('');
     setPrepSummary(null);
-    if (!canStep1) return;
+    if (!canStep1) {
+      if (ronMissingFields.length) setError(`Complete RON setup: ${ronMissingFields.join(', ')}.`);
+      return;
+    }
 
     setPreparing(true);
     try {
@@ -634,17 +1343,26 @@ export default function SigningEnvelope() {
           userId: s.userId || undefined,
         })),
         signingOrder,
+        evidenceMode,
+        ronConfig,
       };
       const prepared = await signingApi.prepare(targetDocId, payload);
       const preparedFields = prepared.fields || prepared.document?.signingFields || [];
+      const cleanedLayout = sanitizeOverlappedTextFields(initFields({ signingFields: preparedFields }), pageMetrics);
+      const alignedFields = alignInitialsToPreviousPages(cleanedLayout.fields, pageMetrics);
 
       setRemoteDoc(prepared.document || targetDoc);
-      setFields(initFields({ signingFields: preparedFields }));
+      setFields(alignedFields);
       setPrepSummary({
-        fieldCount: preparedFields.length,
+        fieldCount: alignedFields.length,
+        removedFieldCount: cleanedLayout.removed.length,
+        overlapCount: cleanedLayout.issues.length,
         status: prepared.preparation?.status,
         reviewRequired: Boolean(prepared.preparation?.reviewRequired),
       });
+      if (cleanedLayout.issues.length) {
+        setError('Some detected fields still overlap. Move or remove the highlighted fields before sending.');
+      }
       setStep(2);
 
       if (targetDocId !== docId || envelopeMode !== 'review') {
@@ -663,17 +1381,37 @@ export default function SigningEnvelope() {
     setError('');
     const bad = signers.find((s) => !s.email || !s.name);
     if (bad) { setError('All signers require a name and email address.'); return; }
+    if (ronMissingFields.length) { setError(`Complete RON setup: ${ronMissingFields.join(', ')}.`); setStep(1); return; }
     if (!fields.length) { setError('Add at least one field before sending this envelope.'); return; }
     if (fields.some((field) => !field.assignedTo)) { setError('Every field must be assigned to a signer.'); return; }
+    const cleanedLayout = sanitizeOverlappedTextFields(fields, pageMetrics);
+    if (cleanedLayout.removed.length) {
+      setFields(cleanedLayout.fields);
+      setSelId(null);
+    }
+    if (cleanedLayout.issues.length) {
+      setStep(2);
+      setSelId(cleanedLayout.issues[0].a.id);
+      setError('Resolve overlapping fields before sending. Text fields cannot be hidden behind signature, date, or other text fields.');
+      return;
+    }
     setSending(true);
     try {
-      const normalizedFields = fields.map((field) => normalizeFieldForStorage(field, pageMetrics));
+      const normalizedFields = cleanedLayout.fields.map((field) => normalizeFieldForStorage(field, pageMetrics));
       const payload = {
         signers: signers.map((s) => ({ name: s.name, email: s.email, role: s.role, userId: s.userId || undefined })),
         fields: normalizedFields,
         pageMetrics,
         signingOrder,
         message,
+        evidenceMode,
+        ronConfig,
+        // SA-specific notarization fields
+        ...(evidenceMode === 'ron' ? {
+          saDocumentType: saDocumentType || undefined,
+          apostilleRequired,
+          scheduledAt: sessionSchedule === 'scheduled' && scheduledAt ? scheduledAt : undefined,
+        } : {}),
       };
       if (isMongoId(docId)) {
         const result = await signingApi.requestSigning(docId, payload);
@@ -697,16 +1435,23 @@ export default function SigningEnvelope() {
     const color = sc(si >= 0 ? si : 0);
     const ft = fieldTypeConfig(field.type);
     const isSel = field.id === selId;
-    const canInlineAssign = isSel && field.type === 'signature' && signers.length > 0;
+    const hasOverlap = overlappingFieldIds.has(field.id);
+    const isMisalignedGuideField = activeGuideFieldId && misalignedGuideFieldIds.has(field.id);
+    const fieldTitle = hasOverlap
+      ? 'This field overlaps another field. Move or remove it before sending.'
+      : isMisalignedGuideField
+        ? 'This field is not aligned with nearby fields.'
+        : undefined;
 
     return (
       <div
         key={field.id}
-        className={`env-fbox env-fbox--${field.type}${isSel ? ' env-fbox--sel' : ''}`}
+        className={`env-fbox env-fbox--${field.type}${isSel ? ' env-fbox--sel' : ''}${hasOverlap ? ' env-fbox--overlap' : ''}${isMisalignedGuideField ? ' env-fbox--misaligned' : ''}`}
         style={{
           ...fieldPercentStyle(field, metric),
           '--fc': color,
         }}
+        title={fieldTitle}
         onPointerDown={(e) => onFieldPointerDown(e, field.id)}
         onClick={(e) => { e.stopPropagation(); setSelId(field.id); }}
       >
@@ -726,27 +1471,6 @@ export default function SigningEnvelope() {
             />
           </>
         )}
-        {canInlineAssign && (
-          <select
-            className="env-fbox-assignee"
-            value={field.assignedTo || ''}
-            title="Assign signature field"
-            onPointerDown={(e) => e.stopPropagation()}
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => e.stopPropagation()}
-            onChange={(e) => {
-              const signer = signers.find((s) => s.email === e.target.value);
-              updateField(field.id, { assignedTo: e.target.value, role: signer?.role || field.role || '' });
-            }}
-          >
-            <option value="" disabled>Assign...</option>
-            {signers.map((signer, index) => (
-              <option key={signer.id || signer.email || index} value={signer.email}>
-                {signer.name || signer.email || `Signer ${index + 1}`}
-              </option>
-            ))}
-          </select>
-        )}
         {field.required && <span className="env-fbox-req">*</span>}
       </div>
     );
@@ -754,6 +1478,7 @@ export default function SigningEnvelope() {
 
   const renderOverlay = ({ pageNumber, width, height }) => {
     const metric = { width, height };
+    const guides = fieldAlignment.guidesByPage.get(pageNumber) || [];
     return (
       <div
         className="env-page-overlay"
@@ -761,6 +1486,24 @@ export default function SigningEnvelope() {
         onDragOver={onPageDragOver}
         onDrop={onPageDrop}
       >
+        {guides.map((guide) => (
+          <span
+            key={`${pageNumber}_${guide.edge}_${guide.ids.join('_')}`}
+            className={`env-align-guide env-align-guide--${guide.axis} env-align-guide--${guide.edge} env-align-guide--${guide.status}`}
+            style={guide.axis === 'horizontal'
+              ? {
+                  top: `${guide.value * 100}%`,
+                  left: `${guide.left * 100}%`,
+                  width: `${guide.width * 100}%`,
+                }
+              : {
+                  left: `${guide.value * 100}%`,
+                  top: `${guide.top * 100}%`,
+                  height: `${guide.height * 100}%`,
+                }}
+            aria-hidden="true"
+          />
+        ))}
         {fields
           .filter((field) => Number(field.page || 1) === pageNumber)
           .map((field) => renderFieldBox(field, metric))}
@@ -827,6 +1570,179 @@ export default function SigningEnvelope() {
                   + Add Signer
                 </button>
               </div>
+
+              <div className="env-trail-control">
+                <button
+                  type="button"
+                  className="env-trail-button"
+                  onClick={() => setTrailOpen((open) => !open)}
+                  aria-expanded={trailOpen}
+                >
+                  <span>Trail</span>
+                  <strong>{selectedTrailOption.title}</strong>
+                </button>
+                {trailOpen && (
+                  <div className="env-trail-menu">
+                    {TRAIL_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        className={`env-trail-option${evidenceMode === option.value ? ' env-trail-option--active' : ''}`}
+                        onClick={() => {
+                          setEvidenceMode(option.value);
+                          setTrailOpen(false);
+                        }}
+                      >
+                        <span>{option.title}</span>
+                        <small>{option.desc}</small>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {evidenceMode === 'ron' && (
+                <div className="env-ron-panel">
+                  <div className="env-ron-head">
+                    <div>
+                      <h3>South African Notarization</h3>
+                      <p>Remote notarization session conducted by a Notary Public admitted by the High Court of South Africa. The session will be recorded and the document sealed with the notary stamp.</p>
+                    </div>
+                    <span>Live A/V</span>
+                  </div>
+
+                  <div className="env-ron-section-label">Notary Public details</div>
+                  <div className="env-ron-grid">
+                    <label className="env-field env-field--grow">
+                      <span>Notary full name *</span>
+                      <input
+                        value={ronConfig.notary?.name || ''}
+                        onChange={(e) => updateRonNotary('name', e.target.value)}
+                        placeholder="As it appears on High Court admission"
+                      />
+                    </label>
+                    <label className="env-field env-field--grow">
+                      <span>Notary email *</span>
+                      <input
+                        type="email"
+                        value={ronConfig.notary?.email || ''}
+                        onChange={(e) => updateRonNotary('email', e.target.value)}
+                        placeholder="notary@example.co.za"
+                      />
+                    </label>
+                    <label className="env-field">
+                      <span>High Court Province *</span>
+                      <select
+                        value={ronConfig.notary?.province || ''}
+                        onChange={(e) => updateRonNotary('province', e.target.value)}
+                      >
+                        <option value="">Select province</option>
+                        {SA_PROVINCES.map((p) => (
+                          <option key={p.code} value={p.code}>{p.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="env-field env-field--grow">
+                      <span>Admission / Commission No. *</span>
+                      <input
+                        value={ronConfig.notary?.admissionNumber || ''}
+                        onChange={(e) => updateRonNotary('admissionNumber', e.target.value)}
+                        placeholder="High Court admission number"
+                      />
+                    </label>
+                    <label className="env-field">
+                      <span>Commission expires *</span>
+                      <input
+                        type="date"
+                        value={ronConfig.notary?.commissionExpiresAt || ''}
+                        onChange={(e) => updateRonNotary('commissionExpiresAt', e.target.value)}
+                      />
+                    </label>
+                    <label className="env-field env-field--grow">
+                      <span>Notarial venue / city *</span>
+                      <input
+                        value={ronConfig.notary?.venue || ''}
+                        onChange={(e) => updateRonNotary('venue', e.target.value)}
+                        placeholder="e.g. Johannesburg, Cape Town"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="env-ron-section-label">Document type</div>
+                  <div className="env-ron-grid">
+                    <label className="env-field env-field--grow">
+                      <span>SA notarial document type</span>
+                      <select value={saDocumentType} onChange={(e) => setSaDocumentType(e.target.value)}>
+                        <option value="">Select type (optional)</option>
+                        {SA_DOCUMENT_TYPES.map((t) => (
+                          <option key={t.value} value={t.value}>{t.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="env-field env-field--grow">
+                      <span>Apostille required</span>
+                      <select value={apostilleRequired ? 'yes' : 'no'} onChange={(e) => setApostilleRequired(e.target.value === 'yes')}>
+                        <option value="no">No — for use in South Africa only</option>
+                        <option value="yes">Yes — document will be used abroad (DIRCO Apostille)</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="env-ron-section-label">Session scheduling</div>
+                  <div className="env-ron-schedule">
+                    <div className="env-ron-choice-row">
+                      {[
+                        { value: 'immediate', label: 'Sign immediately', desc: 'Send the link now — the notary and client can join at any time.' },
+                        { value: 'scheduled', label: 'Schedule a date & time', desc: 'Book a specific time for the live notarization session.' },
+                      ].map((opt) => (
+                        <button
+                          key={opt.value}
+                          type="button"
+                          className={`env-ron-choice${sessionSchedule === opt.value ? ' env-ron-choice--active' : ''}`}
+                          onClick={() => setSessionSchedule(opt.value)}
+                        >
+                          <strong>{opt.label}</strong>
+                          <small>{opt.desc}</small>
+                        </button>
+                      ))}
+                    </div>
+                    {sessionSchedule === 'scheduled' && (
+                      <label className="env-field" style={{ marginTop: '12px' }}>
+                        <span>Session date &amp; time (SA time — SAST, UTC+2)</span>
+                        <input
+                          type="datetime-local"
+                          value={scheduledAt}
+                          min={new Date(Date.now() + 5 * 60 * 1000).toISOString().slice(0, 16)}
+                          onChange={(e) => setScheduledAt(e.target.value)}
+                        />
+                      </label>
+                    )}
+                  </div>
+
+                  <div className="env-ron-section-label">Signer identity proofing</div>
+                  <div className="env-ron-identity">
+                    <div className="env-ron-choice-row">
+                      {RON_IDENTITY_OPTIONS.map((option) => (
+                        <button
+                          key={option.value}
+                          type="button"
+                          className={`env-ron-choice${ronConfig.identityMethod === option.value ? ' env-ron-choice--active' : ''}`}
+                          onClick={() => setRonConfig((current) => ({ ...current, identityMethod: option.value }))}
+                        >
+                          <strong>{option.label}</strong>
+                          <small>{option.desc}</small>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {ronMissingFields.length > 0 && (
+                    <div className="env-ron-warning">
+                      Please complete: {ronMissingFields.join(', ')}.
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="env-signers-list">
                 {signers.map((signer, i) => (
@@ -1106,6 +2022,8 @@ export default function SigningEnvelope() {
               Page {activePage} of {pageCount} · {fields.length} field{fields.length !== 1 ? 's' : ''} placed
               {fields.length === 0 && ' — add at least one field'}
               {prepSummary?.fieldCount > 0 && ` · detected ${prepSummary.fieldCount}`}
+              {prepSummary?.removedFieldCount > 0 && ` · removed ${prepSummary.removedFieldCount} hidden text field${prepSummary.removedFieldCount === 1 ? '' : 's'}`}
+              {fieldOverlapIssues.length > 0 && ` · ${fieldOverlapIssues.length} overlap${fieldOverlapIssues.length === 1 ? '' : 's'} to fix`}
             </span>
             <div className="env-zoom-actions">
               <button className="env-icon-btn" type="button" onClick={() => setZoom((z) => Math.max(0.5, Number((z - 0.1).toFixed(2))))}>-</button>
@@ -1196,6 +2114,189 @@ export default function SigningEnvelope() {
 
             {/* Message */}
             <div className="env-card">
+              <h2>Audit Trail Evidence</h2>
+              <div className="env-review-row">
+                <div className="env-flow-bubble env-flow-bubble--final">T</div>
+                <div className="env-review-info">
+                  <div className="env-review-name">{selectedTrailOption.title}</div>
+                  <div className="env-review-meta">
+                    {selectedTrailOption.desc}
+                    {evidenceMode === 'ron' && ronConfig.notary?.name
+                      ? ` Notary: ${ronConfig.notary.name} (${SA_PROVINCES.find(p => p.code === ronConfig.notary.province)?.name || ronConfig.notary.province || 'province pending'}). Identity: ${selectedRonIdentity.label}.`
+                      : ''}
+                  </div>
+                </div>
+                <button
+                  className="env-review-edit"
+                  onClick={() => setStep(1)}
+                  title="Edit audit trail evidence"
+                >
+                  Edit
+                </button>
+              </div>
+
+              {evidenceMode === 'ron' && (
+                <div className="env-ron-session-panel">
+                  <div className="env-ron-session-head">
+                    <div>
+                      <h3>Live notarization session</h3>
+                      <p>
+                        Status: <strong>{ronSession?.status || 'created'}</strong>
+                        {ronSession?.scheduledAt && ` · Scheduled: ${new Date(ronSession.scheduledAt).toLocaleString('en-ZA', { dateStyle: 'medium', timeStyle: 'short' })}`}
+                        {' · '}Recording: {ronSession?.recordingStatus || 'pending'}
+                      </p>
+                    </div>
+                    {ronSession?.meetingUrl && (
+                      <a href={ronSession.meetingUrl} target="_blank" rel="noreferrer" className="env-review-edit">
+                        Open Room
+                      </a>
+                    )}
+                  </div>
+
+                  {/* Notary workflow: schedule → start → verify identity → client signs → stamp → seal → end */}
+                  <div className="env-ron-workflow">
+                    <div className={`env-ron-step${ronSession?.scheduledAt || ronSession?.notaryStartedAt ? ' env-ron-step--done' : ''}`}>
+                      <span>1</span>Schedule session
+                    </div>
+                    <div className={`env-ron-step${ronSession?.notaryStartedAt ? ' env-ron-step--done' : ''}`}>
+                      <span>2</span>Start live session
+                    </div>
+                    <div className={`env-ron-step${ronIdentityRecords.some(r => r.status === 'verified') ? ' env-ron-step--done' : ''}`}>
+                      <span>3</span>Verify signer identity
+                    </div>
+                    <div className={`env-ron-step${ronSession?.recordingStatus === 'stored' ? ' env-ron-step--done' : ''}`}>
+                      <span>4</span>Client signs
+                    </div>
+                    <div className={`env-ron-step${doc?.signingEvidence?.ron?.notaryStamp?.appliedAt ? ' env-ron-step--done' : ''}`}>
+                      <span>5</span>Apply stamp
+                    </div>
+                    <div className={`env-ron-step${ronSession?.status === 'completed' ? ' env-ron-step--done' : ''}`}>
+                      <span>6</span>End session
+                    </div>
+                  </div>
+
+                  <div className="env-ron-session-actions">
+                    {(!ronSession?.scheduledAt && ronSession?.status !== 'live') && (
+                      <button
+                        type="button"
+                        className="env-btn env-btn--ghost env-btn--sm"
+                        disabled={ronActionBusy === 'start'}
+                        onClick={() => updateRonSession('start')}
+                      >
+                        {ronActionBusy === 'start' ? 'Starting...' : 'Start Session Now'}
+                      </button>
+                    )}
+                    {ronConfig.identityMethod === 'personal_knowledge' && signers.map((signer) => (
+                      <button
+                        key={signer.email}
+                        type="button"
+                        className="env-btn env-btn--ghost env-btn--sm"
+                        disabled={ronActionBusy === 'verify_personal_knowledge'}
+                        onClick={() => updateRonSession('verify_personal_knowledge', { signerEmail: signer.email })}
+                      >
+                        Verify {signer.name.split(' ')[0] || signer.email}
+                      </button>
+                    ))}
+
+                    {/* Notary stamp upload */}
+                    <div className="env-ron-stamp-row">
+                      <label className="env-ron-stamp-label">
+                        <strong>Notary stamp image</strong>
+                        <span> (PNG/JPG, transparent background recommended)</span>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg"
+                          onChange={(e) => setRonStampFile(e.target.files?.[0] || null)}
+                          style={{ display: 'none' }}
+                          id="notary-stamp-upload"
+                        />
+                        <label htmlFor="notary-stamp-upload" className="env-btn env-btn--ghost env-btn--sm" style={{ cursor: 'pointer' }}>
+                          {ronStampFile ? ronStampFile.name : doc?.signingEvidence?.ron?.notaryStamp ? 'Replace stamp' : 'Upload stamp'}
+                        </label>
+                      </label>
+                      {ronStampFile && (
+                        <button
+                          type="button"
+                          className="env-btn env-btn--ghost env-btn--sm"
+                          disabled={ronStampUploading || !isMongoId(docId)}
+                          onClick={async () => {
+                            if (!isMongoId(docId)) return;
+                            setRonStampUploading(true);
+                            try {
+                              const form = new FormData();
+                              form.append('stamp', ronStampFile);
+                              await signingApi.ronStamp(docId, form);
+                              setRonStampFile(null);
+                            } catch (err) {
+                              setError(err.message);
+                            } finally {
+                              setRonStampUploading(false);
+                            }
+                          }}
+                        >
+                          {ronStampUploading ? 'Uploading...' : 'Save stamp'}
+                        </button>
+                      )}
+                      {doc?.signingEvidence?.ron?.notaryStamp?.appliedAt && (
+                        <span className="env-ron-stamp-ok">✓ Stamp stored — will be embedded in finalized PDF</span>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      className="env-btn env-btn--ghost env-btn--sm"
+                      disabled={ronActionBusy === 'seal'}
+                      onClick={() => updateRonSession('seal', { pkiProvider: 'x509-p12' })}
+                    >
+                      {ronActionBusy === 'seal' ? 'Sealing...' : 'Apply PKI Seal & End Session'}
+                    </button>
+                  </div>
+                  <div className="env-ron-recording-row">
+                    <input
+                      type="file"
+                      accept="video/webm,video/mp4,audio/webm,audio/mp4,audio/mpeg"
+                      onChange={(event) => setRonRecordingFile(event.target.files?.[0] || null)}
+                    />
+                    <button
+                      type="button"
+                      className="env-btn env-btn--ghost env-btn--sm"
+                      disabled={ronActionBusy === 'recording'}
+                      onClick={() => { void uploadRonRecording(); }}
+                    >
+                      {ronActionBusy === 'recording' ? 'Uploading...' : 'Store Recording'}
+                    </button>
+                    <input
+                      value={ronRecordingReference}
+                      onChange={(event) => setRonRecordingReference(event.target.value)}
+                      placeholder="Recording reference, S3 key, or local evidence path"
+                    />
+                    <button
+                      type="button"
+                      className="env-btn env-btn--primary env-btn--sm"
+                      disabled={ronActionBusy === 'complete'}
+                      onClick={() => updateRonSession('complete', { recordingReference: ronRecordingReference })}
+                    >
+                      {ronActionBusy === 'complete' ? 'Saving...' : 'Complete Session'}
+                    </button>
+                  </div>
+                  <div className="env-ron-identity-list">
+                    {signers.map((signer) => {
+                      const identity = ronIdentityRecords.find((record) =>
+                        String(record.signerEmail || '').trim().toLowerCase() === String(signer.email || '').trim().toLowerCase()
+                      ) || {};
+                      return (
+                        <span key={signer.email}>
+                          {signer.name}: {identity.status || 'identity pending'}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Message */}
+            <div className="env-card">
               <h2>
                 Message to Signers
                 <span className="env-optional"> (optional)</span>
@@ -1276,14 +2377,18 @@ export default function SigningEnvelope() {
                     <div className="env-dev-signer-name">{s.name}</div>
                     <div className="env-dev-signer-meta">{s.email} · <em>{s.role}</em></div>
                   </div>
-                  <a
-                    className="env-btn env-btn--primary"
-                    href={s.signingUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Sign as {s.name.split(' ')[0]} →
-                  </a>
+                  {s.signingUrl ? (
+                    <a
+                      className="env-btn env-btn--primary"
+                      href={s.signingUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Sign as {s.name.split(' ')[0]} →
+                    </a>
+                  ) : (
+                    <span className="env-dev-waiting">Waiting for turn</span>
+                  )}
                 </div>
               ))}
             </div>

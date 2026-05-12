@@ -12,9 +12,12 @@ const taskRoutes = require('./routes/tasks');
 const documentRoutes = require('./routes/documents');
 const templateRoutes = require('./routes/templates');
 const signingRoutes = require('./routes/signing');
-const aiRoutes = require('./routes/ai');
+const aiRoutes      = require('./routes/ai');
+const aiAuditRoutes = require('./routes/aiAudit');
 const notificationRoutes = require('./routes/notifications');
 const reportRoutes = require('./routes/reports');
+const legalRequestRoutes    = require('./routes/legalRequests');
+const signatureRequestRoutes = require('./routes/signatureRequests');
 const { getInstance: getAiRuntimeManager } = require('./ai/runtime/AiRuntimeManager');
 
 const app = express();
@@ -35,7 +38,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Signing-Session', 'X-Signing-Idempotency-Key', 'X-Signing-Dev-Bypass'],
 }));
 
 app.use(express.json({ limit: '50mb' }));
@@ -70,14 +73,18 @@ app.use('/api/documents', documentRoutes);
 app.use('/api/templates', templateRoutes);
 app.use('/api/signing', signingRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/ai/audit', aiAuditRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/legal-requests', legalRequestRoutes);
+app.use('/api/signature-requests', signatureRequestRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 app.use((err, req, res, next) => {
+  void next;
   console.error(err.stack);
   res.status(err.status || 500).json({
     error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
@@ -96,5 +103,11 @@ app.listen(PORT, () => {
 
 // Start expiry notification cron job after server starts
 require('./services/expiryService');
+
+// Run legal-deadline monitor every 6 hours
+const { runDeadlineMonitor } = require('./services/legalDeadlineMonitorService');
+setInterval(() => {
+  runDeadlineMonitor().catch(err => console.error('[deadlineMonitor]', err));
+}, 6 * 3600 * 1000);
 
 module.exports = app;

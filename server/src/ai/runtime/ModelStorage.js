@@ -30,7 +30,17 @@ function ensureModelsDir() {
 }
 
 function getModelPath(fileName) {
+  if (process.env.LOCAL_MODEL_PATH) {
+    return resolveLocalModelPath(process.env.LOCAL_MODEL_PATH);
+  }
   return path.join(getModelsDir(), fileName);
+}
+
+function resolveLocalModelPath(modelPath) {
+  if (!modelPath) return '';
+  return path.isAbsolute(modelPath)
+    ? modelPath
+    : path.resolve(process.cwd(), modelPath);
 }
 
 function getModelPartPath(fileName) {
@@ -50,6 +60,7 @@ module.exports = {
   getModelsDir,
   ensureModelsDir,
   getModelPath,
+  resolveLocalModelPath,
   getModelPartPath,
   getModelInvalidPath,
   modelExists,

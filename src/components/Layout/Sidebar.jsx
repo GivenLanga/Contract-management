@@ -7,11 +7,17 @@ const navItems = [
   {
     section: 'MAIN',
     items: [
-      { to: '/', label: 'Dashboard', icon: '⊞', exact: true },
-      { to: '/contracts', label: 'Contracts', icon: '📄' },
-      { to: '/tasks', label: 'Tasks', icon: '✅' },
-      { to: '/templates', label: 'Templates', icon: '📋' },
-      { to: '/workflows', label: 'Workflows', icon: '⚡' },
+      { to: '/',               label: 'Dashboard',       icon: '⊞', exact: true },
+      { to: '/legal-requests', label: 'Legal Requests',  icon: '⚖' },
+    ],
+  },
+  {
+    section: 'CONTRACTS',
+    items: [
+      { to: '/contracts',  label: 'Contracts', icon: '📄' },
+      { to: '/tasks',      label: 'Tasks',     icon: '✅' },
+      { to: '/templates',  label: 'Templates', icon: '📋' },
+      { to: '/workflows',  label: 'Workflows', icon: '⚡' },
     ],
   },
   {

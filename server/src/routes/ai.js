@@ -8,6 +8,7 @@ const { getModelsDir } = require('../ai/runtime/ModelStorage');
 const { getLegalFolderRagService } = require('../ai/rag/LegalFolderRagService');
 const { getBackendKnowledgeRagService } = require('../ai/rag/BackendKnowledgeRagService');
 const { getClientSigningStateService } = require('../ai/state/ClientSigningStateService');
+const { AiDataAccessPolicy } = require('../ai/security/AiDataAccessPolicy');
 
 const router = express.Router();
 
@@ -16,6 +17,7 @@ const runtimeManager = () => getRuntimeManager();
 const ragService = () => getLegalFolderRagService();
 const backendRagService = () => getBackendKnowledgeRagService();
 const signingStateService = () => getClientSigningStateService();
+const aiPolicy = new AiDataAccessPolicy();
 
 const envInt = (name, fallback, min) => {
   const parsed = parseInt(process.env[name] || `${fallback}`, 10);
@@ -56,6 +58,13 @@ const scopedSessionId = (user, clientSessionId) => `${user?._id || 'anonymous'}:
 
 const canManageBackendRag = (user) => ['admin', 'manager'].includes(user?.role);
 
+const sanitizeRagSource = (raw) => {
+  if (raw == null) return null;
+  if (typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const name = raw.name != null ? String(raw.name).slice(0, 255) : undefined;
+  return name != null ? { name } : null;
+};
+
 const validateRagSyncPayload = (body) => {
   const documents = Array.isArray(body?.documents) ? body.documents : [];
   if (documents.length > MAX_RAG_SYNC_DOCUMENTS) {
@@ -80,7 +89,16 @@ router.get('/status', async (req, res) => {
   try {
     res.json(await runtimeManager().getStatus());
   } catch (err) {
-    res.status(500).json({ status: 'error', mode: 'local', error: err.message });
+    res.status(500).json({
+      provider: String(process.env.ACTIVE_MODEL_PROVIDER || 'local').toLowerCase(),
+      modelSource: process.env.LOCAL_MODEL_SOURCE || null,
+      runtime: process.env.LOCAL_MODEL_RUNTIME || null,
+      cloudEnabled: process.env.ALLOW_CLOUD_AI === 'true',
+      usesCloudInference: ['huggingface', 'hf'].includes(String(process.env.ACTIVE_MODEL_PROVIDER || '').toLowerCase()),
+      status: 'failed',
+      mode: 'local',
+      error: err.message,
+    });
   }
 });
 
@@ -190,12 +208,15 @@ router.post('/enable', aiMutationLimiter, async (req, res) => {
 // POST /api/ai/rag/legal-folder/sync — sync browser Legal Folder text into local RAG index
 router.post('/rag/legal-folder/sync', aiMutationLimiter, async (req, res) => {
   try {
+    if (!aiPolicy.canUseDocumentRag(req.user)) {
+      return res.status(403).json({ ok: false, error: 'AI document retrieval is not permitted for this user.' });
+    }
     const payloadError = validateRagSyncPayload(req.body);
     if (payloadError) return res.status(413).json({ ok: false, error: payloadError });
 
     const result = ragService().syncLegalFolder({
       userId: req.user._id,
-      source: req.body?.source,
+      source: sanitizeRagSource(req.body?.source),
       documents: req.body?.documents,
     });
     res.json({ ok: true, ...result });
@@ -207,6 +228,9 @@ router.post('/rag/legal-folder/sync', aiMutationLimiter, async (req, res) => {
 // GET /api/ai/rag/legal-folder/status — local RAG index state
 router.get('/rag/legal-folder/status', async (req, res) => {
   try {
+    if (!aiPolicy.canUseDocumentRag(req.user)) {
+      return res.status(403).json({ error: 'AI document retrieval is not permitted for this user.' });
+    }
     res.json(ragService().getStatus(req.user._id));
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -251,7 +275,7 @@ router.post('/rag/backend/reindex', aiMutationLimiter, async (req, res) => {
       return res.status(403).json({ error: 'Only administrators and managers can rebuild backend AI knowledge.' });
     }
 
-    const result = backendRagService().reindex();
+    const result = await backendRagService().reindex();
     res.json({
       ok: true,
       indexedAt: result.indexedAt,
@@ -325,13 +349,13 @@ router.get('/health', async (req, res) => {
 router.get('/suggestions', (req, res) => {
   res.json({
     suggestions: [
-      'How many contracts expire in the next 30 days?',
-      'List my overdue tasks',
+      'What needs my attention today?',
+      'What is overdue?',
+      'Show internal SLA compliance',
+      'What is due this week?',
+      'Who is overloaded on the team?',
+      'List my tasks',
       'Show documents pending signature',
-      'Who is currently drafting?',
-      'What are my notifications?',
-      'Search for the NDA agreement',
-      'Navigate to the signing page',
     ],
   });
 });

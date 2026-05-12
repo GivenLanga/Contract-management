@@ -87,6 +87,15 @@ const safeWordsRegExp = (value, flags = 'i', maxChars = 200) => {
   return new RegExp(words.length ? words.join('|') : escapeRegExp(text), flags);
 };
 
+const legalRequestVisibilityFilter = (user) => {
+  if (isPrivilegedUser(user)) return {};
+
+  const id = userId(user);
+  return id
+    ? { $or: [{ assignedTo: id }, { submittedBy: id }] }
+    : NO_MATCH_FILTER;
+};
+
 module.exports = {
   NO_MATCH_FILTER,
   contractVisibilityFilter,
@@ -94,6 +103,7 @@ module.exports = {
   escapeRegExp,
   isObjectIdLike,
   isPrivilegedUser,
+  legalRequestVisibilityFilter,
   mergeFilters,
   safeRegExp,
   safeWordsRegExp,

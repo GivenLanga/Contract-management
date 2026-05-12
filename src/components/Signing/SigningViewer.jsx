@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { renderDocxPreview } from '../../services/docxPreviewRenderer';
 import { canRenderDocxPreview, getLegalFolderFile } from '../../services/legalFolderFileStore';
 import { getSigningDocument, signDocument, subscribeToSigning } from '../../services/signingStore';
 import { documents, signing as signingApi } from '../../services/api';
+import { collectSigningClientEvidence } from '../../services/signingEvidenceClient';
 import PdfDocumentPreview from './PdfDocumentPreview';
 import SignatureModal from './SignatureModal';
 import {
@@ -49,6 +50,10 @@ const DEFAULT_PAGE_METRICS = PAGE_FALLBACK;
 const PREVIEW_LOG_PREFIX = '[SigningPreview]';
 const isMongoId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
 const normalizedEmail = (value) => String(value || '').trim().toLowerCase();
+const cssEscape = (value) => {
+  if (typeof window !== 'undefined' && window.CSS?.escape) return window.CSS.escape(String(value));
+  return String(value).replace(/["\\]/g, '\\$&');
+};
 
 const typeFromBlob = (doc, blob) => {
   const explicitType = String(doc?.type || '').toLowerCase();
@@ -447,17 +452,24 @@ const decorateDocxPages = (root, chrome) => {
 export default function SigningViewer() {
   const { docId } = useParams();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { user } = useAuth();
 
   const [revision, setRevision] = useState(0);
   const [signingField, setSigningField] = useState(null);
   const [signatureFocus, setSignatureFocus] = useState('signature');
   const [signatureDraft, setSignatureDraft] = useState(null);
+  const [consentAccepted, setConsentAccepted] = useState(false);
+  const [includeLocationEvidence, setIncludeLocationEvidence] = useState(false);
   const [captureMode, setCaptureMode] = useState('signature');
   const [submittingSignature, setSubmittingSignature] = useState(false);
   const [signingError, setSigningError] = useState('');
+  const [certificateDownloading, setCertificateDownloading] = useState(false);
+  const [certificateError, setCertificateError] = useState('');
   const [showModal, setShowModal] = useState(false);
-  const [activeTab, setActiveTab] = useState('signers');
+  const [activeTab, setActiveTab] = useState(() => (
+    searchParams.get('panel') === 'activity' ? 'activity' : 'signers'
+  ));
   const [success, setSuccess] = useState(false);
   const [fileRecord, setFileRecord] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
@@ -488,7 +500,11 @@ export default function SigningViewer() {
 
   useEffect(() => subscribeToSigning(() => setRevision((value) => value + 1)), []);
   useEffect(() => {
+    if (searchParams.get('panel') === 'activity') setActiveTab('activity');
+  }, [searchParams]);
+  useEffect(() => {
     setSignatureDraft(null);
+    setConsentAccepted(false);
     setSigningError('');
     setSubmittingSignature(false);
   }, [docId]);
@@ -699,15 +715,23 @@ export default function SigningViewer() {
     return () => { cancelled = true; };
   }, [docId, revision, localDoc]);
 
-  const signatures = localDoc ? (doc?.signatures || []) : (remoteSignatures.length ? remoteSignatures : (doc?.signatures || []));
+  const signatures = useMemo(() => (
+    localDoc
+      ? (doc?.signatures || [])
+      : (remoteSignatures.length ? remoteSignatures : (doc?.signatures || []))
+  ), [doc?.signatures, localDoc, remoteSignatures]);
   const auditLogs = doc?.auditLogs || [];
   const signerIdentity = useMemo(
     () => ({ name: user?.name || user?.email || '', email: user?.email || '' }),
     [user?.email, user?.name],
   );
+  const allowUnassignedSignerFields = !doc?.signers?.length || doc.signers.length <= 1;
   const signerFields = useMemo(
-    () => (doc?.signingFields || []).filter((field) => !field.assignedTo || normalizedEmail(field.assignedTo) === normalizedEmail(user?.email)),
-    [doc?.signingFields, user?.email],
+    () => (doc?.signingFields || []).filter((field) => (
+      normalizedEmail(field.assignedTo) === normalizedEmail(user?.email) ||
+      (allowUnassignedSignerFields && !field.assignedTo)
+    )),
+    [allowUnassignedSignerFields, doc?.signingFields, user?.email],
   );
   const myPendingSignatureField = signerFields.find(
     (field) => field.type === 'signature' && !field.filled
@@ -721,10 +745,12 @@ export default function SigningViewer() {
   const allSigned = doc?.signingFields?.length > 0
     ? doc.signingFields.every((field) => field.filled)
     : signatures.length > 0 && doc?.status === 'Signed';
-  const canSign = Boolean(doc && !hasSigned && !allSigned && (myPendingSignatureField || !doc.signingFields?.length));
+  const signingMode = searchParams.get('mode') === 'sign';
+  const canSign = Boolean(signingMode && doc && !hasSigned && !allSigned && (myPendingSignatureField || !doc.signingFields?.length));
   const totalFields = doc?.signingFields?.length || 0;
   const completedFields = doc?.signingFields?.filter((field) => field.filled).length || 0;
   const fieldProgress = totalFields > 0 ? Math.round((completedFields / totalFields) * 100) : (hasSigned ? 100 : 0);
+  const myRequiredFields = signerFields.filter((field) => field.required);
   const previewKind = isPdf(doc, fileRecord)
     ? 'pdf'
     : isImage(doc, fileRecord)
@@ -782,10 +808,14 @@ export default function SigningViewer() {
   }, []);
 
   const updateFieldValue = (fieldId, value) => {
+    setSigningError('');
     setFieldValues((current) => ({ ...current, [fieldId]: value }));
   };
 
-  const fieldIsMine = (field) => !field.assignedTo || normalizedEmail(field.assignedTo) === normalizedEmail(user?.email);
+  const fieldIsMine = (field) => (
+    normalizedEmail(field.assignedTo) === normalizedEmail(user?.email) ||
+    (allowUnassignedSignerFields && !field.assignedTo)
+  );
   const valueFieldComplete = (field, value) => {
     if (field.type === 'checkbox' || field.type === 'radio') return value === true || value === 'true';
     return String(value ?? '').trim().length > 0;
@@ -795,9 +825,6 @@ export default function SigningViewer() {
     return String(value ?? '').trim();
   };
 
-  const requiredValueFieldsComplete = signerFields
-    .filter((field) => VALUE_FIELD_TYPES.has(field.type) && field.required && !field.filled)
-    .every((field) => valueFieldComplete(field, fieldValues[field.id]));
   const draftHasSignature = Boolean(signatureDraft?.signatureData);
   const draftHasInitials = !myPendingInitialsField || Boolean(signatureDraft?.initialsData);
   const draftReadyToSend = draftHasSignature && draftHasInitials;
@@ -825,12 +852,22 @@ export default function SigningViewer() {
     return field.type === 'initials' ? signature?.initialsData : signature?.signatureData;
   };
 
-  const openSignatureModal = (field = myPendingSignatureField, focus = 'signature') => {
-    if (!requiredValueFieldsComplete && !signatureDraft) {
-      setSuccess(false);
-      setSigningError('Complete required fields on the document before signing.');
-      return;
+  const fieldIsComplete = (field) => {
+    if (field.filled) return true;
+    if (SIGNATURE_FIELD_TYPES.has(field.type)) return Boolean(draftImageForField(field));
+    if (VALUE_FIELD_TYPES.has(field.type)) {
+      return valueFieldComplete(field, fieldValues[field.id] ?? defaultFieldValue(field, signerIdentity));
     }
+    return false;
+  };
+  const missingRequiredField = myRequiredFields.find((field) => !fieldIsComplete(field)) || null;
+  const allRequiredFieldsComplete = myRequiredFields.every(fieldIsComplete);
+  const myCompletedRequiredFields = myRequiredFields.filter(fieldIsComplete).length;
+  const myRequiredProgress = myRequiredFields.length
+    ? Math.round((myCompletedRequiredFields / myRequiredFields.length) * 100)
+    : (hasSigned ? 100 : 0);
+
+  const openSignatureModal = (field = myPendingSignatureField, focus = 'signature') => {
     const targetField = field?.type === 'signature' ? field : myPendingSignatureField;
     setSigningError('');
     setSignatureFocus(focus);
@@ -848,12 +885,41 @@ export default function SigningViewer() {
     }
   };
 
+  const scrollToField = (field) => {
+    if (!field?.id) return;
+    const target = previewScrollRef.current?.querySelector(`[data-sv-field-id="${cssEscape(field.id)}"]`);
+    if (!target) return;
+
+    target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    window.setTimeout(() => {
+      const focusTarget = target.matches('button, input, select, textarea')
+        ? target
+        : target.querySelector('button, input, select, textarea');
+      focusTarget?.focus?.({ preventScroll: true });
+    }, 240);
+  };
+
+  const handleNextRequiredField = () => {
+    setSuccess(false);
+    setSigningError('');
+    if (!missingRequiredField) {
+      if (!signatureDraft) openSignatureModal(myPendingSignatureField, 'signature');
+      return;
+    }
+
+    scrollToField(missingRequiredField);
+    if (SIGNATURE_FIELD_TYPES.has(missingRequiredField.type)) {
+      window.setTimeout(() => openField(missingRequiredField), 280);
+    }
+  };
+
   const renderSigningField = (field, metric) => {
     const cfg = fieldTypeConfig(field.type);
     const isMine = fieldIsMine(field);
     const draftImage = imageForField(field);
-    const editable = canSign && isMine && !field.filled && !signatureDraft;
+    const editable = canSign && isMine && !field.filled;
     const canEditDraft = Boolean(signatureDraft && isMine && !field.filled && SIGNATURE_FIELD_TYPES.has(field.type));
+    const isMissingRequired = Boolean(signingMode && field.required && isMine && !fieldIsComplete(field));
     const value = fieldValues[field.id] ?? defaultFieldValue(field, signerIdentity);
     const className = [
       'sv-doc-field',
@@ -863,12 +929,14 @@ export default function SigningViewer() {
       editable ? 'sv-doc-field--editable' : '',
       canEditDraft ? 'sv-doc-field--editable' : '',
       isMine ? 'sv-doc-field--mine' : '',
+      isMissingRequired ? 'sv-doc-field--missing' : '',
     ].filter(Boolean).join(' ');
 
     if (VALUE_FIELD_TYPES.has(field.type) && editable) {
       const common = {
         className,
         style: fieldPercentStyle(field, metric),
+        'data-sv-field-id': field.id,
         'aria-label': `${cfg.label}${field.required ? ' required' : ''}`,
       };
       if (field.type === 'checkbox' || field.type === 'radio') {
@@ -904,6 +972,7 @@ export default function SigningViewer() {
           key={field.id}
           className={className}
           style={fieldPercentStyle(field, metric)}
+          data-sv-field-id={field.id}
           aria-label={`${cfg.label}${field.required ? ' required' : ''}`}
         >
           {displayValue || cfg.label}
@@ -918,6 +987,7 @@ export default function SigningViewer() {
         type="button"
         className={className}
         style={fieldPercentStyle(field, metric)}
+        data-sv-field-id={field.id}
         onClick={() => openField(field)}
         disabled={(!editable && !canEditDraft) || !SIGNATURE_FIELD_TYPES.has(field.type)}
         title={field.filled ? `${cfg.label} complete` : cfg.label}
@@ -933,12 +1003,12 @@ export default function SigningViewer() {
   };
 
   const renderPdfFieldOverlay = ({ pageNumber, width, height }) => {
+    const pageFields = (doc?.signingFields || []).filter((field) => Number(field.page || 1) === pageNumber);
+    if (!pageFields.length) return null;
     const metric = { width, height };
     return (
       <div className="sv-field-layer">
-        {(doc?.signingFields || [])
-          .filter((field) => Number(field.page || 1) === pageNumber)
-          .map((field) => renderSigningField(field, metric))}
+        {pageFields.map((field) => renderSigningField(field, metric))}
       </div>
     );
   };
@@ -1097,16 +1167,31 @@ export default function SigningViewer() {
       setSigningError('Add your initials before sending.');
       return;
     }
-    if (!requiredValueFieldsComplete) {
-      setSigningError('Complete required fields on the document before sending.');
+    if (!allRequiredFieldsComplete) {
+      setSigningError('Complete all required fields on the document before sending.');
+      if (missingRequiredField) scrollToField(missingRequiredField);
+      return;
+    }
+    if (!consentAccepted) {
+      setSigningError('Accept electronic signature consent before sending.');
       return;
     }
 
     setSubmittingSignature(true);
     setSigningError('');
     try {
+      const clientEvidence = await collectSigningClientEvidence({
+        scope: `${docId}:${user?.email || 'signer'}`,
+        includeLocation: includeLocationEvidence,
+      });
+      const signingPayload = {
+        ...signatureDraft,
+        fieldValues: valuesForSubmission(),
+        consentAccepted,
+        clientEvidence,
+      };
       if (isMongoId(docId) && remoteDoc) {
-        const result = await signingApi.sign(docId, { ...signatureDraft, fieldValues: valuesForSubmission() });
+        const result = await signingApi.sign(docId, signingPayload);
         if (result?.signature) {
           setRemoteSignatures((current) => [
             ...current.filter((signature) => signature._id !== result.signature._id),
@@ -1116,9 +1201,11 @@ export default function SigningViewer() {
         const refreshed = await documents.get(docId);
         setRemoteDoc(refreshed.document);
       } else {
-        signDocument(docId, { ...signatureDraft, fieldValues: valuesForSubmission() }, user);
+        signDocument(docId, signingPayload, user);
       }
       setSignatureDraft(null);
+      setConsentAccepted(false);
+      setIncludeLocationEvidence(false);
       setSuccess(true);
       setRevision((value) => value + 1);
     } catch (err) {
@@ -1128,12 +1215,163 @@ export default function SigningViewer() {
     }
   };
 
-  const signedByUser = (email) => signatures.find((signature) => normalizedEmail(signature.signerEmail) === normalizedEmail(email));
+  const primarySigningLabel = (() => {
+    if (submittingSignature) return 'Sending...';
+    if (!signatureDraft) return missingRequiredField ? 'Next Required Field' : 'Sign This Document';
+    if (!draftReadyToSend) return !draftHasInitials ? 'Add Initials' : 'Add Signature';
+    if (!allRequiredFieldsComplete) return 'Next Required Field';
+    return 'Send Signed Document';
+  })();
+  const primarySigningVerb = signatureDraft && draftReadyToSend && allRequiredFieldsComplete ? 'Send' : 'Next';
+  const primarySigningDisabled = Boolean(
+    submittingSignature ||
+    (signatureDraft && draftReadyToSend && allRequiredFieldsComplete && !consentAccepted)
+  );
+  const handlePrimarySigningAction = () => {
+    if (!signatureDraft) {
+      if (missingRequiredField) handleNextRequiredField();
+      else openSignatureModal(myPendingSignatureField, 'signature');
+      return;
+    }
+    if (!draftReadyToSend) {
+      openSignatureModal(!draftHasInitials && myPendingInitialsField ? myPendingInitialsField : myPendingSignatureField, !draftHasInitials ? 'initials' : 'signature');
+      return;
+    }
+    if (!allRequiredFieldsComplete) {
+      handleNextRequiredField();
+      return;
+    }
+    submitSignatureDraft();
+  };
 
-  const formatTime = (date) => new Date(date).toLocaleString([], {
-    dateStyle: 'short',
-    timeStyle: 'short',
-  });
+  const formatTime = (date) => {
+    const parsed = new Date(date);
+    if (!Number.isFinite(parsed.getTime())) return '-';
+    return parsed.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC');
+  };
+  const compactHash = (hash) => {
+    const value = String(hash || '').trim();
+    if (!value) return '-';
+    if (value.length <= 24) return value;
+    return `${value.slice(0, 12)}...${value.slice(-8)}`;
+  };
+  const downloadBlobFile = (filename, blob) => {
+    const url = window.URL.createObjectURL(blob);
+    const link = window.document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    window.document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
+  };
+  const handleDownloadCertificate = async () => {
+    if (!isMongoId(docId)) {
+      setCertificateError('The Certificate of Completion is available after server finalization.');
+      return;
+    }
+    setCertificateDownloading(true);
+    setCertificateError('');
+    try {
+      const result = await signingApi.completionCertificate(docId);
+      if (!result?.blob) throw new Error('Certificate download failed.');
+      const baseName = String(doc?.name || 'document').replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '_');
+      downloadBlobFile(result.filename || `${baseName}_certificate_of_completion.pdf`, result.blob);
+    } catch (error) {
+      setCertificateError(error.message || 'Could not download the Certificate of Completion.');
+    } finally {
+      setCertificateDownloading(false);
+    }
+  };
+  const signerRows = useMemo(() => {
+    const fields = doc?.signingFields || [];
+    const signatureByEmail = new Map(
+      signatures
+        .filter((signature) => signature.signerEmail)
+        .map((signature) => [normalizedEmail(signature.signerEmail), signature])
+    );
+    const fieldsByEmail = new Map();
+    const unassignedFields = [];
+
+    fields.forEach((field) => {
+      const email = normalizedEmail(field.assignedTo);
+      if (!email) {
+        unassignedFields.push(field);
+        return;
+      }
+      if (!fieldsByEmail.has(email)) fieldsByEmail.set(email, []);
+      fieldsByEmail.get(email).push(field);
+    });
+
+    const rows = (doc?.signers || []).map((signer) => {
+      const email = normalizedEmail(signer.email);
+      const signerFieldsForEmail = fieldsByEmail.get(email) || [];
+      const signature = signatureByEmail.get(email);
+      const completedFieldsForEmail = signerFieldsForEmail.filter((field) => field.filled).length;
+      return {
+        key: email || signer._id || signer.name || signer.role,
+        name: signature?.signerName || signer.name || signer.email || 'Signer',
+        email: signer.email || '',
+        role: signer.role || 'Signatory',
+        isMe: email && email === normalizedEmail(user?.email),
+        signed: signer.signingStatus === 'signed' || Boolean(signature) || (signerFieldsForEmail.length > 0 && completedFieldsForEmail === signerFieldsForEmail.length),
+        signedAt: signer.signedAt || signature?.signedAt || signerFieldsForEmail.find((field) => field.filled)?.filledAt,
+        fieldCount: signerFieldsForEmail.length,
+        completedFields: completedFieldsForEmail,
+      };
+    });
+
+    fieldsByEmail.forEach((signerFieldsForEmail, email) => {
+      if (rows.some((row) => normalizedEmail(row.email) === email)) return;
+      const signature = signatureByEmail.get(email);
+      const completedFieldsForEmail = signerFieldsForEmail.filter((field) => field.filled).length;
+      rows.push({
+        key: email,
+        name: signature?.signerName || signerFieldsForEmail[0]?.assignedTo || 'Signer',
+        email,
+        role: signerFieldsForEmail[0]?.role || signature?.signerRole || 'Signatory',
+        isMe: email === normalizedEmail(user?.email),
+        signed: Boolean(signature) || completedFieldsForEmail === signerFieldsForEmail.length,
+        signedAt: signature?.signedAt || signerFieldsForEmail.find((field) => field.filled)?.filledAt,
+        fieldCount: signerFieldsForEmail.length,
+        completedFields: completedFieldsForEmail,
+      });
+    });
+
+    if (unassignedFields.length) {
+      const completedFieldsForEmail = unassignedFields.filter((field) => field.filled).length;
+      rows.push({
+        key: 'unassigned',
+        name: 'Any signer',
+        email: '',
+        role: unassignedFields[0]?.role || 'Signatory',
+        isMe: allowUnassignedSignerFields,
+        signed: completedFieldsForEmail === unassignedFields.length,
+        signedAt: unassignedFields.find((field) => field.filled)?.filledAt,
+        fieldCount: unassignedFields.length,
+        completedFields: completedFieldsForEmail,
+      });
+    }
+
+    if (!rows.length && signatures.length) {
+      return signatures.map((signature) => ({
+        key: signature._id || signature.signerEmail,
+        name: signature.signerName || signature.signerEmail || 'Signer',
+        email: signature.signerEmail || '',
+        role: signature.signerRole || 'Signatory',
+        isMe: normalizedEmail(signature.signerEmail) === normalizedEmail(user?.email),
+        signed: true,
+        signedAt: signature.signedAt,
+        fieldCount: 0,
+        completedFields: 0,
+      }));
+    }
+
+    return rows;
+  }, [allowUnassignedSignerFields, doc?.signers, doc?.signingFields, signatures, user?.email]);
+  const finalization = doc?.finalization || {};
+  const finalizationComplete = finalization.status === 'finalized';
+  const canDownloadCertificate = isMongoId(docId) && (doc?.status === 'Signed' || finalizationComplete);
 
   if (!doc) {
     return (
@@ -1376,23 +1614,13 @@ export default function SigningViewer() {
 
             {canSign && !fileLoading && !fileError && (
               <div className="sv-floating-sign">
-                {signatureDraft ? (
-                  <button
-                    className="sv-btn sv-btn--sign"
-                    disabled={!requiredValueFieldsComplete || submittingSignature}
-                    onClick={draftReadyToSend ? submitSignatureDraft : () => openSignatureModal(!draftHasInitials && myPendingInitialsField ? myPendingInitialsField : myPendingSignatureField, !draftHasInitials ? 'initials' : 'signature')}
-                  >
-                    {draftReadyToSend ? (submittingSignature ? 'Sending...' : 'Send Signed Document') : (!draftHasInitials ? 'Add Initials' : 'Add Signature')}
-                  </button>
-                ) : (
-                  <button
-                    className="sv-btn sv-btn--sign"
-                    disabled={!requiredValueFieldsComplete}
-                    onClick={() => openSignatureModal(myPendingSignatureField)}
-                  >
-                    Sign This Document
-                  </button>
-                )}
+                <button
+                  className="sv-btn sv-btn--sign"
+                  disabled={primarySigningDisabled}
+                  onClick={handlePrimarySigningAction}
+                >
+                  {primarySigningLabel}
+                </button>
               </div>
             )}
           </div>
@@ -1428,38 +1656,52 @@ export default function SigningViewer() {
               {canSign && (
                 <div className="sv-my-action">
                   <div className="sv-my-action-label">Your action required</div>
-                  {signatureDraft ? (
-                    <>
-                      <button
-                        className="sv-sign-btn"
-                        disabled={!requiredValueFieldsComplete || submittingSignature}
-                        onClick={draftReadyToSend ? submitSignatureDraft : () => openSignatureModal(!draftHasInitials && myPendingInitialsField ? myPendingInitialsField : myPendingSignatureField, !draftHasInitials ? 'initials' : 'signature')}
-                      >
-                        <span>{draftReadyToSend ? 'Send' : 'Add'}</span>
-                        {draftReadyToSend ? (submittingSignature ? 'Sending...' : 'Send Signed Document') : (!draftHasInitials ? 'Add Initials' : 'Add Signature')}
-                      </button>
-                      <button
-                        className="sv-sign-btn sv-sign-btn--secondary"
-                        type="button"
-                        onClick={() => openSignatureModal(myPendingSignatureField)}
-                      >
-                        <span>Edit</span>
-                        Signature
-                      </button>
-                    </>
-                  ) : (
+                  <button
+                    className="sv-sign-btn"
+                    disabled={primarySigningDisabled}
+                    onClick={handlePrimarySigningAction}
+                  >
+                    <span>{primarySigningVerb}</span>
+                    {primarySigningLabel}
+                  </button>
+                  {signatureDraft && (
                     <button
-                      className="sv-sign-btn"
-                      disabled={!requiredValueFieldsComplete}
+                      className="sv-sign-btn sv-sign-btn--secondary"
+                      type="button"
                       onClick={() => openSignatureModal(myPendingSignatureField)}
                     >
-                      <span>Sign</span>
-                      Sign This Document
+                      <span>Edit</span>
+                      Signature
                     </button>
                   )}
-                  {!requiredValueFieldsComplete && (
+                  {signatureDraft && draftReadyToSend && (
+                    <>
+                      <label className="sv-consent-check">
+                        <input
+                          type="checkbox"
+                          checked={consentAccepted}
+                          onChange={(event) => {
+                            setConsentAccepted(event.target.checked);
+                            if (event.target.checked && signingError === 'Accept electronic signature consent before sending.') {
+                              setSigningError('');
+                            }
+                          }}
+                        />
+                        <span>I agree to use electronic records and signatures for this document.</span>
+                      </label>
+                      <label className="sv-consent-check sv-consent-check--optional">
+                        <input
+                          type="checkbox"
+                          checked={includeLocationEvidence}
+                          onChange={(event) => setIncludeLocationEvidence(event.target.checked)}
+                        />
+                        <span>Include my location in the signing evidence. Your browser will ask for permission before sharing it.</span>
+                      </label>
+                    </>
+                  )}
+                  {missingRequiredField && (
                     <p className="sv-sign-legal">
-                      Complete required fields on the document before signing.
+                      {myRequiredFields.length - myCompletedRequiredFields} required field{myRequiredFields.length - myCompletedRequiredFields === 1 ? '' : 's'} left.
                     </p>
                   )}
                   {signingError && <p className="sv-sign-error" role="alert">{signingError}</p>}
@@ -1475,16 +1717,28 @@ export default function SigningViewer() {
 
               <div className="sv-field-summary">
                 <div className="sv-field-summary__header">
-                  <span>Signing progress</span>
+                  <span>{signingMode ? 'Your required fields' : 'Signing progress'}</span>
                   <strong>
-                    {totalFields > 0
-                      ? `${completedFields} of ${totalFields} fields complete`
-                      : hasSigned ? 'Signed' : 'Signature pending'}
+                    {signingMode && myRequiredFields.length > 0
+                      ? `${myCompletedRequiredFields} of ${myRequiredFields.length} complete`
+                      : totalFields > 0
+                        ? `${completedFields} of ${totalFields} fields complete`
+                        : hasSigned ? 'Signed' : 'No fields placed'}
                   </strong>
                 </div>
                 <div className="sv-field-progress" aria-hidden="true">
-                  <span style={{ width: `${fieldProgress}%` }} />
+                  <span style={{ width: `${signingMode ? myRequiredProgress : fieldProgress}%` }} />
                 </div>
+                {signingMode && missingRequiredField && (
+                  <button type="button" className="sv-next-field-btn" onClick={handleNextRequiredField}>
+                    Next required field
+                  </button>
+                )}
+                {signingMode && totalFields > 0 && (
+                  <div className="sv-field-summary__small">
+                    Envelope: {completedFields} of {totalFields} fields complete
+                  </div>
+                )}
               </div>
 
               {hasSigned && (
@@ -1496,50 +1750,37 @@ export default function SigningViewer() {
 
               <div className="sv-signers-title">All Signers</div>
 
-              {doc.signingFields && doc.signingFields.length > 0 ? (
-                doc.signingFields.map((field) => {
-                  const signature = signedByUser(field.assignedTo);
-                  const isMe = field.assignedTo === user?.email;
-                  const name = signature?.signerName || field.assignedTo || 'Any signer';
-
-                  return (
-                    <div
-                      key={field.id || `${field.role}-${field.assignedTo}`}
-                      className={`sv-signer-card${field.filled ? ' sv-signer-card--signed' : ''}${isMe ? ' sv-signer-card--me' : ''}`}
-                    >
-                      <div className="sv-signer-avatar">
-                        {name.charAt(0).toUpperCase()}
-                      </div>
-                      <div className="sv-signer-info">
-                        <div className="sv-signer-email">{name}</div>
-                        <div className="sv-signer-role">
-                          {field.role || 'Signatory'}
-                          {isMe && <span className="sv-you-tag">You</span>}
-                        </div>
-                        {field.filled ? (
-                          <div className="sv-signer-signed">
-                            Signed {formatTime(field.filledAt || signature?.signedAt)}
-                          </div>
-                        ) : (
-                          <div className="sv-signer-pending">Awaiting signature</div>
-                        )}
-                      </div>
-                      <div className="sv-signer-status-icon">
-                        {field.filled ? '✅' : '⏳'}
-                      </div>
+              {signerRows.length > 0 ? (
+                signerRows.map((row, index) => (
+                  <div
+                    key={row.key || row.email || index}
+                    className={`sv-signer-card${row.signed ? ' sv-signer-card--signed' : ''}${row.isMe ? ' sv-signer-card--me' : ''}`}
+                  >
+                    <div className="sv-signer-avatar">
+                      {(row.name || row.email || 'S').charAt(0).toUpperCase()}
                     </div>
-                  );
-                })
-              ) : signatures.length > 0 ? (
-                signatures.map((signature) => (
-                  <div key={signature._id} className="sv-signer-card sv-signer-card--signed">
-                    <div className="sv-signer-avatar">{signature.signerName?.charAt(0).toUpperCase()}</div>
                     <div className="sv-signer-info">
-                      <div className="sv-signer-email">{signature.signerName}</div>
-                      <div className="sv-signer-role">{signature.signerRole}</div>
-                      <div className="sv-signer-signed">Signed {formatTime(signature.signedAt)}</div>
+                      <div className="sv-signer-email">{row.name}</div>
+                      <div className="sv-signer-role">
+                        {row.role}
+                        {row.isMe && <span className="sv-you-tag">You</span>}
+                      </div>
+                      {row.fieldCount > 0 && (
+                        <div className="sv-signer-fields">
+                          {row.completedFields} of {row.fieldCount} field{row.fieldCount === 1 ? '' : 's'} complete
+                        </div>
+                      )}
+                      {row.signed ? (
+                        <div className="sv-signer-signed">
+                          Signed {formatTime(row.signedAt)}
+                        </div>
+                      ) : (
+                        <div className="sv-signer-pending">Awaiting signature</div>
+                      )}
                     </div>
-                    <div className="sv-signer-status-icon">✅</div>
+                    <div className="sv-signer-status-icon">
+                      {row.signed ? '✅' : '⏳'}
+                    </div>
                   </div>
                 ))
               ) : (
@@ -1614,14 +1855,33 @@ export default function SigningViewer() {
               {allSigned && (
                 <div className="sv-audit-cert">
                   <div className="sv-audit-cert-header">
-                    <span>⚖</span> Digital Witness Certificate
+                    <span>⚖</span> {finalizationComplete ? 'Digital Completion Certificate' : 'Signing Evidence'}
                   </div>
                   <div className="sv-audit-cert-body">
-                    <p>This document was electronically signed by all required parties via ContractIQ.</p>
+                    <p>
+                      This document was electronically signed by all required parties. Detailed evidence is stored in the audit trail.
+                    </p>
                     <div className="sv-audit-cert-row"><span>Document:</span><span>{doc.name}</span></div>
                     <div className="sv-audit-cert-row"><span>Parties:</span><span>{signatures.length} signer{signatures.length !== 1 ? 's' : ''}</span></div>
                     <div className="sv-audit-cert-row"><span>Completed:</span><span>{signatures.length > 0 ? formatTime(signatures[signatures.length - 1].signedAt) : '-'}</span></div>
+                    <div className="sv-audit-cert-row"><span>Final PDF:</span><span>{finalizationComplete ? 'Finalized' : (finalization.status || 'Pending')}</span></div>
+                    <div className="sv-audit-cert-row"><span>Finalized:</span><span>{finalization.finalizedAt ? formatTime(finalization.finalizedAt) : '-'}</span></div>
+                    <div className="sv-audit-cert-row"><span>PDF hash:</span><span>{compactHash(finalization.finalPdfHash)}</span></div>
+                    <div className="sv-audit-cert-row"><span>Digital seal:</span><span>{finalization.digitalSignatureStatus || 'not configured'}</span></div>
                     <div className="sv-audit-cert-row"><span>Platform:</span><span>ContractIQ Signing</span></div>
+                    {canDownloadCertificate && (
+                      <div className="sv-audit-cert-actions">
+                        <button
+                          type="button"
+                          className="sv-btn sv-btn--primary"
+                          onClick={handleDownloadCertificate}
+                          disabled={certificateDownloading}
+                        >
+                          {certificateDownloading ? 'Preparing Certificate...' : 'Download Certificate PDF'}
+                        </button>
+                        {certificateError && <p className="sv-cert-error">{certificateError}</p>}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

@@ -2,43 +2,15 @@ const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-
-const base64ToBuffer = (base64) => {
-  const data = base64.replace(/^data:image\/\w+;base64,/, '');
-  return Buffer.from(data, 'base64');
-};
-
-const placementToPdfRect = (page, placement) => {
-  const { width: pageWidth, height: pageHeight } = page.getSize();
-  const origin = placement.origin || 'top-left';
-
-  if (origin === 'normalized') {
-    const width = Number(placement.width || 0) * pageWidth;
-    const height = Number(placement.height || 0) * pageHeight;
-    return {
-      x: Number(placement.x || 0) * pageWidth,
-      y: pageHeight - (Number(placement.y || 0) * pageHeight) - height,
-      width,
-      height,
-    };
-  }
-
-  if (origin === 'pdf') {
-    return {
-      x: Number(placement.x || 0),
-      y: Number(placement.y || 0),
-      width: Number(placement.width || 0),
-      height: Number(placement.height || 0),
-    };
-  }
-
-  return {
-    x: Number(placement.x || 0),
-    y: pageHeight - Number(placement.y || 0) - Number(placement.height || 0),
-    width: Number(placement.width || 0),
-    height: Number(placement.height || 0),
-  };
-};
+const {
+  MIN_PDF_RECT_SIZE,
+  SIGNATURE_IMAGE_PADDING,
+  base64ToBuffer,
+  formatUtcTimestamp,
+  placementToPdfRect,
+  insetRect,
+  imageFitRect,
+} = require('../utils/pdfHelpers');
 
 /**
  * Embed a signature image into a PDF at a specified position.
@@ -77,27 +49,27 @@ const embedSignatureInPDF = async (pdfPath, signatureBase64, options = {}) => {
   const rect = placementToPdfRect(targetPage, { x, y, width, height, origin });
 
   targetPage.drawImage(sigImage, {
-    x: rect.x,
-    y: rect.y,
-    width: rect.width,
-    height: rect.height,
+    ...imageFitRect(sigImage, insetRect(rect, SIGNATURE_IMAGE_PADDING)),
   });
 
-  // Signature date + name under signature
-  targetPage.drawText(`Signed: ${signerName}`, {
-    x: rect.x,
-    y: rect.y - 14,
-    size: 9,
-    font,
-    color: rgb(0.3, 0.3, 0.3),
-  });
-  targetPage.drawText(signedAt.toLocaleString(), {
-    x: rect.x,
-    y: rect.y - 26,
-    size: 8,
-    font,
-    color: rgb(0.5, 0.5, 0.5),
-  });
+  if (process.env.SIGNING_VISIBLE_SIGNATURE_CAPTIONS === 'true' && rect.y >= 32) {
+    targetPage.drawText(`Signed by ${signerName || signerEmail || 'Signer'}`, {
+      x: rect.x,
+      y: rect.y - 14,
+      size: 7,
+      font,
+      color: rgb(0.3, 0.3, 0.3),
+      maxWidth: rect.width,
+    });
+    targetPage.drawText(formatUtcTimestamp(signedAt), {
+      x: rect.x,
+      y: rect.y - 24,
+      size: 6,
+      font,
+      color: rgb(0.5, 0.5, 0.5),
+      maxWidth: rect.width,
+    });
+  }
 
   // Add initials to all middle pages
   if (initialsBase64 && pages.length > 2) {
@@ -136,10 +108,10 @@ const embedSignatureInPDF = async (pdfPath, signatureBase64, options = {}) => {
     thickness: 0.5,
     color: rgb(0.8, 0.8, 0.8),
   });
-  lastPage.drawText(`Digitally signed by ${signerName} <${signerEmail}> on ${signedAt.toISOString()}`, {
+  lastPage.drawText(`Digitally signed by ${signerName} <${signerEmail}> on ${formatUtcTimestamp(signedAt)}`, {
     x: 40, y: 45, size: 7, font, color: rgb(0.5, 0.5, 0.5),
   });
-  lastPage.drawText('Signed via ContractIQ — Tamper-evident digital signature', {
+  lastPage.drawText('Signed via ContractIQ - tamper-evident digital signature', {
     x: 40, y: 35, size: 7, font, color: rgb(0.5, 0.5, 0.5),
   });
 

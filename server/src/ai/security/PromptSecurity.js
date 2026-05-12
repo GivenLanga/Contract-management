@@ -28,7 +28,28 @@ const SECRET_VALUE_PATTERNS = [
   /\bhf_[A-Za-z0-9]{20,}\b/g,
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
+  /\bmongodb(?:\+srv)?:\/\/[^\s"'<>]+/gi,
+  /\bpostgres(?:ql)?:\/\/[^\s"'<>]+/gi,
+  /\bmysql:\/\/[^\s"'<>]+/gi,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /\b(?:JWT_SECRET|ENCRYPTION_KEY|DATABASE_URL|MONGO_URI|SMTP_PASS|SMTP_PASSWORD|HF_TOKEN)\s*[:=]\s*["']?[^"'\s,;]{4,}/gi,
   /\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*["']?[^"'\s,;]{8,}/gi,
+  /\b(?:signing|signature)[_-]?(?:token|link|url)\s*[:=]\s*["']?[^"'\s,;]{8,}/gi,
+  /\/(?:sign|signing|signature)\/(?:public\/)?[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*token[A-Za-z0-9._~:/?#[\]@!$&'()*+,;=%-]*/gi,
+  /\b[A-Za-z0-9_-]{32,}\.[A-Za-z0-9_-]{32,}\.[A-Za-z0-9_-]{16,}\b/g,
+];
+
+const SIGNING_URL_PATTERNS = [
+  /https?:\/\/[^\s"'<>]*(?:signing|signature|sign)[^\s"'<>]*(?:token|access|public)[^\s"'<>]*/gi,
+  /\/api\/sign(?:ing|ature)?\/[^\s"'<>]*(?:token|public|external)[^\s"'<>]*/gi,
+];
+
+const SOURCE_CODE_LEAK_PATTERNS = [
+  /\bmongoose\.Schema\b/,
+  /\bmodule\.exports\b/,
+  /\brouter\.(get|post|put|patch|delete)\s*\(/,
+  /\bprocess\.env\.[A-Z0-9_]+\b/,
+  /\brequire\(['"][^'"]+['"]\)/,
 ];
 
 const PII_PATTERNS = [
@@ -53,6 +74,9 @@ const redactSensitiveText = (value, options = {}) => {
 
   for (const pattern of SECRET_VALUE_PATTERNS) {
     text = text.replace(pattern, '[redacted-secret]');
+  }
+  for (const pattern of SIGNING_URL_PATTERNS) {
+    text = text.replace(pattern, '[redacted-signing-link]');
   }
 
   if (redactPii) {
@@ -98,13 +122,21 @@ const sanitizeRetrievedSnippet = (value, options = {}) => {
   };
 };
 
-const sanitizeAssistantContent = (value) => {
+const sanitizeAssistantContent = (value, options = {}) => {
+  const { capabilities } = options;
   let content = redactSensitiveText(value, { maxChars: DEFAULT_MAX_TEXT_CHARS });
 
   if (SYSTEM_PROMPT_LEAK_PATTERNS.some((pattern) => pattern.test(content))) {
     return {
       blocked: true,
       content: 'I cannot reveal internal assistant instructions or hidden configuration. I can still help with contract, task, document, or signing questions.',
+    };
+  }
+
+  if (capabilities && !capabilities.backendSourceRag && SOURCE_CODE_LEAK_PATTERNS.some((pattern) => pattern.test(content))) {
+    return {
+      blocked: true,
+      content: 'I cannot reveal backend source code or implementation internals for your role. I can provide safe product help or answer permitted app-data questions through tools.',
     };
   }
 

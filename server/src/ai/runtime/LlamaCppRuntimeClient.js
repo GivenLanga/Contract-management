@@ -30,10 +30,16 @@ class LlamaCppRuntimeClient {
     this._ctx     = null;
     this._Session = null;
     this._ready   = false;
+    this._modelPath = null;
     this._generationQueue = Promise.resolve();
   }
 
   async start(modelDef, modelPath) {
+    if (this._ready && this._modelPath === modelPath) {
+      console.log('[AI Runtime] Model already loaded in llama.cpp client; reusing warm context.');
+      return;
+    }
+
     let mod;
     try {
       // node-llama-cpp v3 may ship as ESM; dynamic import() handles both.
@@ -57,6 +63,7 @@ class LlamaCppRuntimeClient {
       flashAttention: true,
     });
     this._ready = true;
+    this._modelPath = modelPath;
     console.log('[AI Runtime] Model ready.');
   }
 
@@ -66,6 +73,7 @@ class LlamaCppRuntimeClient {
     try { await this._model?.dispose?.(); } catch {}
     try { await this._llama?.dispose?.(); } catch {}
     this._ctx = this._model = this._llama = null;
+    this._modelPath = null;
     this._generationQueue = Promise.resolve();
   }
 
@@ -118,6 +126,7 @@ class LlamaCppRuntimeClient {
       const response = await session.prompt(prompt, {
         maxTokens:   input.maxTokens  || LOCAL_MAX_OUTPUT_TOKENS,
         temperature: input.temperature ?? LOCAL_TEMPERATURE,
+        signal:      input.signal,   // node-llama-cpp v3 aborts on AbortSignal
       });
 
       const parsed = this._parse(response.trim());

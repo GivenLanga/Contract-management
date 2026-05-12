@@ -1,10 +1,11 @@
-const contractTools  = require('./contracts.tools');
-const signingTools   = require('./signing.tools');
-const taskTools      = require('./tasks.tools');
-const documentTools  = require('./documents.tools');
-const navTools       = require('./navigation.tools');
-const overviewTools  = require('./overview.tools');
-const notificationTools = require('./notifications.tools');
+const contractTools      = require('./contracts.tools');
+const signingTools       = require('./signing.tools');
+const taskTools          = require('./tasks.tools');
+const documentTools      = require('./documents.tools');
+const navTools           = require('./navigation.tools');
+const overviewTools      = require('./overview.tools');
+const notificationTools  = require('./notifications.tools');
+const workflowTools      = require('./workflow.tools');
 
 class ToolRegistry {
   constructor() {
@@ -17,6 +18,7 @@ class ToolRegistry {
       ...navTools,
       ...overviewTools,
       ...notificationTools,
+      ...workflowTools,
     ]) {
       this._tools.set(tool.name, tool);
     }

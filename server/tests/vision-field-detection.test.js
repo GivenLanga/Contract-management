@@ -5,6 +5,7 @@ const { visionPercentToPdfField } = require('../src/services/visionFieldDetectio
 const {
   assignFieldsToSigners,
   buildMiddlePageInitialFields,
+  finalizeDetectedFieldLayout,
   mergeFields,
   pathGeometryFromOperatorList,
   textLayoutFieldsFromLines,
@@ -97,6 +98,75 @@ test('mergeFields preserves stacked text fields with matching x positions', () =
     'Full Name: __________________________________',
     'Title: __________________________________',
   ]);
+});
+
+test('finalizeDetectedFieldLayout removes hidden same-space text fields', () => {
+  const fields = finalizeDetectedFieldLayout(mergeFields([
+    {
+      type: 'text',
+      page: 1,
+      x: 144,
+      y: 430,
+      width: 189,
+      height: 20,
+      source: 'heuristic-keyword',
+      confidence: 0.82,
+      context: 'Name: __________________________________',
+    },
+    {
+      type: 'date',
+      page: 1,
+      x: 144,
+      y: 430,
+      width: 189,
+      height: 24,
+      source: 'heuristic-keyword',
+      confidence: 0.82,
+      context: 'Date: __________________________________',
+    },
+  ], [
+    { page: 1, width: 612, height: 792 },
+  ]));
+
+  assert.equal(fields.fields.length, 1);
+  assert.equal(fields.fields[0].type, 'date');
+  assert.equal(fields.removedFields.length, 1);
+  assert.equal(fields.removedFields[0].type, 'text');
+  assert.equal(fields.overlaps.length, 0);
+});
+
+test('finalizeDetectedFieldLayout trims stacked fields instead of leaving overlaps', () => {
+  const layout = finalizeDetectedFieldLayout(mergeFields([
+    {
+      type: 'text',
+      page: 1,
+      x: 144,
+      y: 500,
+      width: 189,
+      height: 24,
+      source: 'heuristic-keyword',
+      confidence: 0.82,
+      context: 'Full Name: __________________________________',
+    },
+    {
+      type: 'text',
+      page: 1,
+      x: 144,
+      y: 488,
+      width: 189,
+      height: 24,
+      source: 'heuristic-keyword',
+      confidence: 0.82,
+      context: 'Title: __________________________________',
+    },
+  ], [
+    { page: 1, width: 612, height: 792 },
+  ]));
+
+  const [top, bottom] = layout.fields;
+  assert.equal(layout.fields.length, 2);
+  assert.equal(layout.overlaps.length, 0);
+  assert.ok(bottom.y + bottom.height <= top.y);
 });
 
 test('textLayoutFieldsFromLines sizes explicit Date fields before the next label', () => {
@@ -480,6 +550,23 @@ test('textLayoutFieldsFromLines treats designation as text, not signature', () =
 
   assert.equal(fields.length, 1);
   assert.equal(fields[0].type, 'text');
+});
+
+test('textLayoutFieldsFromLines detects Place as a text field', () => {
+  const fields = textLayoutFieldsFromLines([
+    {
+      text: 'Place: ____________________',
+      y: 420,
+      runs: [
+        { textIndex: 7, textEnd: 27, x: 150, y: 420, width: 180, chars: 20 },
+      ],
+    },
+  ], 1, { page: 1, width: 612, height: 792 }, [{ email: 'signer@example.com' }]);
+
+  assert.equal(fields.length, 1);
+  assert.equal(fields[0].type, 'text');
+  assert.equal(fields[0].detector, 'pdfjs-text-underline-text');
+  assert.equal(fields[0].x, 150);
 });
 
 test('textLayoutFieldsFromLines ignores table prose that mentions sign authority', () => {

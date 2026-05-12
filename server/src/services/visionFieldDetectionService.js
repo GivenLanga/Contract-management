@@ -94,14 +94,24 @@ const detectVisionFields = ({ pdfPath, pageMetrics = [] }) => new Promise((resol
     },
   });
 
+  const MAX_STDOUT_BYTES = Number(process.env.IDP_VISION_MAX_OUTPUT_BYTES) || 4 * 1024 * 1024; // 4 MB
   let stdout = '';
+  let stdoutBytes = 0;
   let stderr = '';
   const timeout = setTimeout(() => {
     diagnostics.error = 'YOLO vision worker timed out.';
     child.kill('SIGTERM');
   }, Number(process.env.IDP_VISION_TIMEOUT_MS) || 60000);
 
-  child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+  child.stdout.on('data', (chunk) => {
+    stdoutBytes += chunk.length;
+    if (stdoutBytes > MAX_STDOUT_BYTES) {
+      diagnostics.error = 'YOLO vision worker output exceeded size limit.';
+      child.kill('SIGTERM');
+      return;
+    }
+    stdout += chunk.toString();
+  });
   child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
   child.on('error', (error) => {
     clearTimeout(timeout);

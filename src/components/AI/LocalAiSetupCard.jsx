@@ -5,6 +5,12 @@ function formatBytes(value = 0) {
   return `About ${Math.round(value / (1024 * 1024))} MB`;
 }
 
+function sourceLabel(value) {
+  if (value === 'huggingface_download') return 'Hugging Face download';
+  if (value === 'local_file') return 'Local file';
+  return value || 'Configured local source';
+}
+
 export default function LocalAiSetupCard({ status, onDownload, onUseWithoutAi, busy }) {
   const resumed = status?.status === 'download_paused';
 
@@ -20,7 +26,7 @@ export default function LocalAiSetupCard({ status, onDownload, onUseWithoutAi, b
         <p>
           {resumed
             ? 'Your progress is saved. Click Resume to continue from where you left off.'
-            : 'Your contract data will stay on this computer and will not be sent to an external AI provider.'}
+            : 'Your contract data stays on this computer. No prompts, documents, RAG snippets, signing data, or workflow data are sent to cloud AI.'}
         </p>
       </div>
 
@@ -32,6 +38,18 @@ export default function LocalAiSetupCard({ status, onDownload, onUseWithoutAi, b
         <div>
           <span>Download size</span>
           <strong>{formatBytes(status?.downloadSizeBytes)}</strong>
+        </div>
+        <div>
+          <span>Model source</span>
+          <strong>{sourceLabel(status?.modelSource)}</strong>
+        </div>
+        <div>
+          <span>Runtime</span>
+          <strong>{status?.runtime || 'Local runtime'}</strong>
+        </div>
+        <div>
+          <span>Cloud AI</span>
+          <strong>{status?.cloudEnabled ? 'Enabled' : 'Disabled'}</strong>
         </div>
         <div className="ai-setup-grid-wide">
           <span>Storage location</span>

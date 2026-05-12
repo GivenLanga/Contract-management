@@ -11,6 +11,17 @@ const createTransport = () =>
     },
   });
 
+const escapeHtml = (value) =>
+  String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+const signingMessageFor = (document) =>
+  escapeHtml(document?.signingPreparation?.diagnostics?.message || document?.message || '');
+
 const baseTemplate = (content, title) => `
 <!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -96,14 +107,16 @@ const sendSigningRequest = async (signer, document, requestedBy, signerToken) =>
   const signingLink = signerToken
     ? `${appUrl}/sign/external/${signerToken}`
     : `${appUrl}/signing`;
+  const customMessage = signingMessageFor(document);
   const html = baseTemplate(`
-    <p>Hi <strong>${signer.name || signer.email}</strong>,</p>
+    <p>Hi <strong>${escapeHtml(signer.name || signer.email)}</strong>,</p>
     <p>Your signature is required on the following document.</p>
     <div class="meta">
-      <p><strong>Document:</strong> ${document.name}</p>
-      <p><strong>Requested by:</strong> ${requestedBy.name || requestedBy.email}</p>
-      <p><strong>Your role:</strong> ${signer.role || 'Signatory'}</p>
+      <p><strong>Document:</strong> ${escapeHtml(document.name)}</p>
+      <p><strong>Requested by:</strong> ${escapeHtml(requestedBy.name || requestedBy.email)}</p>
+      <p><strong>Your role:</strong> ${escapeHtml(signer.role || 'Signatory')}</p>
     </div>
+    ${customMessage ? `<div class="meta"><p><strong>Message:</strong> ${customMessage}</p></div>` : ''}
     <p>Click the button below to review and sign the document. No account required.</p>
     <a href="${signingLink}" class="btn">Review &amp; Sign Document</a>
     <p style="font-size:12px;color:#888;margin-top:16px;">If the button doesn't work, copy this link: ${signingLink}</p>
@@ -116,27 +129,43 @@ const sendSigningReminder = async (signer, document, requestedBy, signerToken) =
   const signingLink = signerToken
     ? `${appUrl}/sign/external/${signerToken}`
     : `${appUrl}/signing`;
+  const customMessage = signingMessageFor(document);
   const html = baseTemplate(`
-    <p>Hi <strong>${signer.name || signer.email}</strong>,</p>
+    <p>Hi <strong>${escapeHtml(signer.name || signer.email)}</strong>,</p>
     <p>This is a friendly reminder that your signature is still required on the document below.</p>
     <div class="meta">
-      <p><strong>Document:</strong> ${document.name}</p>
-      <p><strong>Requested by:</strong> ${requestedBy.name || requestedBy.email}</p>
-      <p><strong>Your role:</strong> ${signer.role || 'Signatory'}</p>
+      <p><strong>Document:</strong> ${escapeHtml(document.name)}</p>
+      <p><strong>Requested by:</strong> ${escapeHtml(requestedBy.name || requestedBy.email)}</p>
+      <p><strong>Your role:</strong> ${escapeHtml(signer.role || 'Signatory')}</p>
     </div>
+    ${customMessage ? `<div class="meta"><p><strong>Message:</strong> ${customMessage}</p></div>` : ''}
     <a href="${signingLink}" class="btn">Sign Now</a>
     <p style="font-size:12px;color:#888;margin-top:16px;">If the button doesn't work, copy this link: ${signingLink}</p>
   `, 'Reminder: Signature Required');
   return send(signer.email, `Reminder — Signature Required: ${document.name}`, html);
 };
 
+const sendSigningAuthCode = async (signer, document, code, expiresAt) => {
+  const expiryLabel = new Date(expiresAt).toLocaleString();
+  const html = baseTemplate(`
+    <p>Hi <strong>${escapeHtml(signer.name || signer.email)}</strong>,</p>
+    <p>Use this verification code to continue signing <strong>${escapeHtml(document.name)}</strong>.</p>
+    <div class="meta">
+      <p><strong>Verification code:</strong> <span style="font-size:22px;letter-spacing:4px;font-weight:800;color:#1a2744">${escapeHtml(code)}</span></p>
+      <p><strong>Expires:</strong> ${escapeHtml(expiryLabel)}</p>
+    </div>
+    <p>If you did not request this code, you can ignore this email.</p>
+  `, 'Verify Signing Access');
+  return send(signer.email, `Verification Code: ${document.name}`, html);
+};
+
 const sendSigningCompletion = async (owner, document, signers = []) => {
   const signerRows = signers
-    .map((s) => `<tr><td style="padding:4px 8px;font-size:13px;">${s.name || s.email}</td><td style="padding:4px 8px;font-size:13px;color:#15803d;">${s.signingStatus === 'signed' ? '&#10003; Signed' : s.signingStatus}</td></tr>`)
+    .map((s) => `<tr><td style="padding:4px 8px;font-size:13px;">${escapeHtml(s.name || s.email)}</td><td style="padding:4px 8px;font-size:13px;color:#15803d;">${s.signingStatus === 'signed' ? '&#10003; Signed' : escapeHtml(s.signingStatus)}</td></tr>`)
     .join('');
   const html = baseTemplate(`
-    <p>Hi <strong>${owner.name || owner.email}</strong>,</p>
-    <p>All signatures have been collected. <strong>${document.name}</strong> is now fully executed.</p>
+    <p>Hi <strong>${escapeHtml(owner.name || owner.email)}</strong>,</p>
+    <p>All signatures have been collected. <strong>${escapeHtml(document.name)}</strong> is now fully executed.</p>
     <table style="width:100%;border-collapse:collapse;margin:16px 0;border:1px solid #e2e8f0;border-radius:6px;overflow:hidden">
       <thead><tr style="background:#f1f5f9"><th style="padding:6px 8px;text-align:left;font-size:12px;color:#64748b">Signer</th><th style="padding:6px 8px;text-align:left;font-size:12px;color:#64748b">Status</th></tr></thead>
       <tbody>${signerRows}</tbody>
@@ -149,13 +178,14 @@ const sendSigningCompletion = async (owner, document, signers = []) => {
 const sendSigningConfirmation = async (recipient, document, signer, isOwner) => {
   const title = isOwner ? 'Document Signed' : 'Your Signature Was Recorded';
   const html = baseTemplate(`
-    <p>Hi <strong>${recipient.name || recipient.email}</strong>,</p>
-    <p><strong>${signer.name || signer.email}</strong> has signed <strong>${document.name}</strong>.</p>
+    <p>Hi <strong>${escapeHtml(recipient.name || recipient.email)}</strong>,</p>
+    <p><strong>${escapeHtml(signer.name || signer.email)}</strong> has signed <strong>${escapeHtml(document.name)}</strong>.</p>
     <div class="meta">
-      <p><strong>Signed by:</strong> ${signer.name || signer.email} (${signer.email})</p>
-      <p><strong>Signed at:</strong> ${new Date().toLocaleString()}</p>
-      <p><strong>Document:</strong> ${document.name}</p>
+      <p><strong>Signed by:</strong> ${escapeHtml(signer.name || signer.email)} (${escapeHtml(signer.email)})</p>
+      <p><strong>Signed at:</strong> ${escapeHtml(new Date(signer.signedAt || Date.now()).toLocaleString())}</p>
+      <p><strong>Document:</strong> ${escapeHtml(document.name)}</p>
     </div>
+    ${isOwner ? '' : '<p>Your signing receipt is available from the original signing link while the link remains valid.</p>'}
   `, title);
   return send(recipient.email, `${title}: ${document.name}`, html);
 };
@@ -176,14 +206,38 @@ const sendExpiryAlert = async (recipient, contract, daysUntilExpiry) => {
   return send(recipient.email, `Contract Expiry Alert: ${contract.title}`, html);
 };
 
+const sendNotarizationComplete = async (signer, document, notary = {}, downloadUrl = null) => {
+  const notaryProvince = notary.province || notary.commissionState || '';
+  const notaryAdmission = notary.admissionNumber || notary.commissionNumber || '';
+  const html = baseTemplate(`
+    <p>Hi <strong>${escapeHtml(signer.name || signer.email)}</strong>,</p>
+    <p>Your document <strong>${escapeHtml(document.name)}</strong> has been officially notarized by a Notary Public admitted by the High Court of South Africa.</p>
+    <div class="meta">
+      <p><strong>Document:</strong> ${escapeHtml(document.name)}</p>
+      <p><strong>Notarized by:</strong> ${escapeHtml(notary.name || 'Notary Public')}</p>
+      ${notaryAdmission ? `<p><strong>Admission / Commission No.:</strong> ${escapeHtml(notaryAdmission)}</p>` : ''}
+      ${notaryProvince ? `<p><strong>High Court Province:</strong> ${escapeHtml(notaryProvince)}</p>` : ''}
+      <p><strong>Notarized on:</strong> ${new Date().toLocaleString('en-ZA', { dateStyle: 'full', timeStyle: 'short', timeZone: 'Africa/Johannesburg' })}</p>
+    </div>
+    ${downloadUrl ? `<p><a href="${escapeHtml(downloadUrl)}" class="btn">Download Notarized Document</a></p>` : '<p>The notarized document has been saved securely in your ContractIQ vault.</p>'}
+    <p style="font-size:12px;color:#888;margin-top:20px;border-top:1px solid #eee;padding-top:12px;">
+      This notarization was conducted in accordance with South African law. The Notary Public is admitted to practise by the High Court of South Africa.
+      If this document is intended for use abroad, an Apostille may be required from the Department of International Relations and Cooperation (DIRCO).
+    </p>
+  `, 'Your Document Has Been Notarized');
+  return send(signer.email, `Notarized: ${escapeHtml(document.name)}`, html);
+};
+
 module.exports = {
   sendTaskAssignment,
   sendTaskCompletion,
   sendDocumentUpload,
   sendSigningRequest,
   sendSigningReminder,
+  sendSigningAuthCode,
   sendSigningCompletion,
   sendSigningConfirmation,
+  sendNotarizationComplete,
   sendExpiryAlert,
   send,
 };

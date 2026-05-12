@@ -1,7 +1,6 @@
-const fs = require('fs');
+const fsPromises = require('fs').promises;
 const path = require('path');
-const { can } = require('../../middleware/rbac');
-const { isPrivilegedUser } = require('../security/DataScope');
+const { AiDataAccessPolicy } = require('../security/AiDataAccessPolicy');
 const { redactSensitiveText, sanitizeRetrievedSnippet } = require('../security/PromptSecurity');
 
 const envInt = (name, fallback, min) => {
@@ -21,12 +20,14 @@ const REINDEX_INTERVAL_MS = envInt('AI_BACKEND_RAG_REINDEX_INTERVAL_MS', 60000, 
 const BACKEND_QUERY_HINT = /\b(backend|server|api|endpoint|route|controller|middleware|service|model|schema|database|mongodb|mongoose|rbac|permission|role|auth|authentication|jwt|upload|email service|web app|application|feature|workflow|implementation|code|config|environment|how does .* work|what does .* do)\b/i;
 const APP_ENTITY_WITH_TECH_HINT = /(?:\b(contract|document|task|template|signing|report|notification|user|legal folder)\b[\s\S]{0,80}\b(model|schema|route|endpoint|api|service|controller|permission|field|backend|server|code|implementation)\b)|(?:\b(model|schema|route|endpoint|api|service|controller|permission|field|backend|server|code|implementation)\b[\s\S]{0,80}\b(contract|document|task|template|signing|report|notification|user|legal folder)\b)/i;
 
-const PUBLIC_FILE_PATTERNS = [
-  /^src\/routes\//,
-  /^src\/models\//,
-  /^src\/middleware\/rbac\.js$/,
-  /^src\/server\.js$/,
+const HELP_FILE_PATTERNS = [
   /^SETUP\.md$/,
+  /^src\/ai\/config\/legalWorkflowSla\.js$/,
+  /^src\/models\/LegalRequest\.js$/,
+  /^src\/models\/SignatureRequest\.js$/,
+  /^src\/models\/Signatory\.js$/,
+  /^src\/services\/legalWorkflowService\.js$/,
+  /^src\/services\/signingService\.js$/,
 ];
 
 const SOURCE_FILE_PATTERNS = [
@@ -85,41 +86,49 @@ const isDenied = (relPath) => DENY_PATH_PATTERNS.some((pattern) => pattern.test(
 
 const hasAllowedPattern = (relPath, patterns) => patterns.some((pattern) => pattern.test(relPath));
 
-const canUseInternalKnowledge = (user) =>
-  isPrivilegedUser(user) || can(user, 'user:manage');
-
 class BackendKnowledgeRagService {
   constructor(options = {}) {
     this._rootDir = options.rootDir || DEFAULT_SERVER_ROOT;
     this._sourceDirs = options.sourceDirs || DEFAULT_SOURCE_DIRS;
     this._includeSource = options.includeSource ?? process.env.AI_BACKEND_RAG_INCLUDE_SOURCE !== 'false';
     this._enabled = options.enabled ?? process.env.AI_BACKEND_RAG_ENABLED !== 'false';
+    this._policy = options.policy || new AiDataAccessPolicy();
     this._chunks = [];
     this._files = [];
     this._indexedAt = null;
     this._lastAttemptAt = 0;
+    this._indexingPromise = null; // guard against concurrent reindex
   }
 
-  shouldRetrieve(query) {
-    return this._enabled && (BACKEND_QUERY_HINT.test(query || '') || APP_ENTITY_WITH_TECH_HINT.test(query || ''));
+  shouldRetrieve(query, user) {
+    if (!this._enabled) return false;
+    if (user !== undefined && !this._canUseAnyBackendRag(user)) return false;
+    return BACKEND_QUERY_HINT.test(query || '') || APP_ENTITY_WITH_TECH_HINT.test(query || '');
   }
 
   getStatus(user) {
-    const publicChunks = this._chunks.filter((chunk) => chunk.audience === 'public').length;
-    const internalChunks = this._chunks.filter((chunk) => chunk.audience === 'internal').length;
+    const helpChunks = this._chunks.filter((chunk) => chunk.audience === 'help').length;
+    const sourceChunks = this._chunks.filter((chunk) => chunk.audience === 'source').length;
+    const hasHelp = this._policy.canUseBackendRag(user, 'help');
+    const hasSource = this._policy.canUseBackendRag(user, 'source');
     return {
       enabled: this._enabled,
       indexed: Boolean(this._indexedAt),
       indexedAt: this._indexedAt,
       sourceFiles: this._files.length,
-      chunks: this._chunks.length,
-      publicChunks,
-      internalChunks: canUseInternalKnowledge(user) ? internalChunks : undefined,
-      internalAccess: canUseInternalKnowledge(user),
+      chunks: (hasHelp || hasSource) ? this._chunks.length : 0,
+      helpChunks: hasHelp ? helpChunks : 0,
+      sourceChunks: hasSource ? sourceChunks : undefined,
+      publicChunks: hasHelp ? helpChunks : 0,
+      internalChunks: hasSource ? sourceChunks : undefined,
+      helpAccess: hasHelp,
+      sourceAccess: hasSource,
+      publicAccess: hasHelp,
+      internalAccess: hasSource,
     };
   }
 
-  reindex() {
+  async reindex() {
     this._chunks = [];
     this._files = [];
     this._indexedAt = null;
@@ -127,15 +136,16 @@ class BackendKnowledgeRagService {
   }
 
   async retrieve({ user, query }) {
-    if (!this.shouldRetrieve(query)) return null;
+    if (!this.shouldRetrieve(query, user)) return null;
 
-    const index = this._buildIndex();
+    const index = await this._buildIndex();
     const tokens = tokenize(query);
     if (tokens.length === 0 || !index.chunks.length) return null;
 
-    const allowInternal = canUseInternalKnowledge(user);
+    const allowHelp = this._policy.canUseBackendRag(user, 'help');
+    const allowSource = this._policy.canUseBackendRag(user, 'source');
     const candidates = index.chunks
-      .filter((chunk) => chunk.audience === 'public' || allowInternal)
+      .filter((chunk) => (chunk.audience === 'help' && allowHelp) || (chunk.audience === 'source' && allowSource))
       .map((chunk) => ({ ...chunk, score: this._scoreChunk(chunk, query, tokens) }))
       .filter((chunk) => chunk.score > 0)
       .sort((a, b) => b.score - a.score)
@@ -148,6 +158,7 @@ class BackendKnowledgeRagService {
         id: `BK${index + 1}`,
         title: chunk.title,
         sourcePath: chunk.sourcePath,
+        sourceLabel: chunk.sourceLabel,
         audience: chunk.audience,
         snippet: chunk.text,
         securityFlags: chunk.securityFlags || [],
@@ -159,15 +170,15 @@ class BackendKnowledgeRagService {
     if (!retrieval?.snippets?.length) return '';
 
     return retrieval.snippets.map((item) => [
-      `[${item.id}] Backend source: ${item.title}`,
-      `Path: ${item.sourcePath}`,
+      `[${item.id}] Backend reference: ${item.title}`,
+      item.audience === 'source' ? `Path: ${item.sourcePath}` : `Source: ${item.sourceLabel || path.basename(item.sourcePath || '') || 'App help'}`,
       `Audience: ${item.audience}`,
       item.securityFlags?.length ? `Security note: prompt-like instructions were detected and removed. Flags: ${item.securityFlags.join(', ')}` : null,
       `Excerpt: ${item.snippet}`,
     ].filter(Boolean).join('\n')).join('\n\n');
   }
 
-  _buildIndex(options = {}) {
+  async _buildIndex(options = {}) {
     const now = Date.now();
     if (!options.force && this._indexedAt && now - this._lastAttemptAt < REINDEX_INTERVAL_MS) {
       return { chunks: this._chunks, files: this._files, indexedAt: this._indexedAt };
@@ -176,15 +187,21 @@ class BackendKnowledgeRagService {
     this._lastAttemptAt = now;
     if (!this._enabled) return { chunks: [], files: [], indexedAt: null };
 
-    const files = this._collectFiles();
+    if (this._indexingPromise) return this._indexingPromise;
+    this._indexingPromise = this._runIndex().finally(() => { this._indexingPromise = null; });
+    return this._indexingPromise;
+  }
+
+  async _runIndex() {
+    const files = await this._collectFiles();
     const chunks = [];
 
     for (const file of files) {
       const relPath = safeRel(this._rootDir, file);
-      const text = this._readSafeFile(file);
+      const text = await this._readSafeFile(file);
       if (!text) continue;
 
-      chunks.push(...this._buildPublicChunks(relPath, text));
+      chunks.push(...this._buildHelpChunks(relPath, text));
       if (this._includeSource && hasAllowedPattern(relPath, SOURCE_FILE_PATTERNS)) {
         chunks.push(...this._chunkSourceFile(relPath, text));
       }
@@ -197,15 +214,15 @@ class BackendKnowledgeRagService {
     return { chunks: this._chunks, files: this._files, indexedAt: this._indexedAt };
   }
 
-  _collectFiles() {
+  async _collectFiles() {
     const collected = [];
-    const visit = (targetPath) => {
+    const visit = async (targetPath) => {
       const resolved = path.resolve(this._rootDir, targetPath);
       if (resolved !== this._rootDir && !resolved.startsWith(`${this._rootDir}${path.sep}`)) return;
 
       let stat;
       try {
-        stat = fs.statSync(resolved);
+        stat = await fsPromises.stat(resolved);
       } catch {
         return;
       }
@@ -214,24 +231,26 @@ class BackendKnowledgeRagService {
       if (isDenied(relPath)) return;
 
       if (stat.isDirectory()) {
-        for (const entry of fs.readdirSync(resolved)) {
-          visit(path.join(targetPath, entry));
+        let entries;
+        try { entries = await fsPromises.readdir(resolved); } catch { return; }
+        for (const entry of entries) {
+          await visit(path.join(targetPath, entry));
         }
         return;
       }
 
       if (!stat.isFile() || stat.size > MAX_FILE_BYTES || !isTextFile(resolved)) return;
-      if (!hasAllowedPattern(relPath, SOURCE_FILE_PATTERNS) && !hasAllowedPattern(relPath, PUBLIC_FILE_PATTERNS)) return;
+      if (!hasAllowedPattern(relPath, SOURCE_FILE_PATTERNS) && !hasAllowedPattern(relPath, HELP_FILE_PATTERNS)) return;
       collected.push(resolved);
     };
 
-    for (const sourceDir of this._sourceDirs) visit(sourceDir);
+    for (const sourceDir of this._sourceDirs) await visit(sourceDir);
     return collected.sort();
   }
 
-  _readSafeFile(filePath) {
+  async _readSafeFile(filePath) {
     try {
-      const raw = fs.readFileSync(filePath, 'utf8');
+      const raw = await fsPromises.readFile(filePath, 'utf8');
       return redactSensitiveText(raw, {
         redactPii: false,
         maxChars: MAX_FILE_BYTES,
@@ -241,23 +260,20 @@ class BackendKnowledgeRagService {
     }
   }
 
-  _buildPublicChunks(relPath, text) {
-    if (!hasAllowedPattern(relPath, PUBLIC_FILE_PATTERNS)) return [];
+  _buildHelpChunks(relPath, text) {
+    if (!hasAllowedPattern(relPath, HELP_FILE_PATTERNS)) return [];
 
-    if (relPath.startsWith('src/routes/')) {
-      return this._routeSummaryChunks(relPath, text);
-    }
-    if (relPath.startsWith('src/models/')) {
-      return this._modelSummaryChunks(relPath, text);
-    }
-    if (relPath === 'src/middleware/rbac.js') {
-      return this._rbacSummaryChunks(relPath, text);
-    }
-    if (relPath === 'src/server.js') {
-      return this._serverSummaryChunks(relPath, text);
-    }
     if (relPath === 'SETUP.md') {
-      return this._publicTextChunks(relPath, 'Setup guide', text);
+      return this._helpTextChunks(relPath, 'Setup guide', text);
+    }
+    if (relPath === 'src/ai/config/legalWorkflowSla.js') {
+      return this._slaHelpChunks(relPath, text);
+    }
+    if (relPath === 'src/models/LegalRequest.js' || relPath === 'src/services/legalWorkflowService.js') {
+      return this._workflowHelpChunks(relPath, text);
+    }
+    if (relPath === 'src/models/SignatureRequest.js' || relPath === 'src/models/Signatory.js' || relPath === 'src/services/signingService.js') {
+      return this._signingHelpChunks(relPath, text);
     }
 
     return [];
@@ -274,7 +290,7 @@ class BackendKnowledgeRagService {
     return [this._makeChunk({
       title: `Routes in ${relPath}`,
       sourcePath: relPath,
-      audience: 'public',
+      audience: 'source',
       text: `Backend route file ${relPath} exposes these route handlers:\n${routes.map((route) => `- ${route}`).join('\n')}`,
     })];
   }
@@ -290,7 +306,7 @@ class BackendKnowledgeRagService {
     return [this._makeChunk({
       title: `${schemaName} data model`,
       sourcePath: relPath,
-      audience: 'public',
+      audience: 'source',
       text: `${schemaName} model fields visible for assistant documentation: ${fields.join(', ')}.`,
     })];
   }
@@ -301,7 +317,7 @@ class BackendKnowledgeRagService {
     return [this._makeChunk({
       title: 'RBAC roles and permissions',
       sourcePath: relPath,
-      audience: 'public',
+      audience: 'source',
       text: `The backend defines these roles: ${roles.join(', ')}. Permission names include: ${permissions.join(', ')}.`,
     })];
   }
@@ -312,15 +328,69 @@ class BackendKnowledgeRagService {
     return [this._makeChunk({
       title: 'Express server route mounts and middleware',
       sourcePath: relPath,
-      audience: 'public',
+      audience: 'source',
       text: `Express server mounts: ${mounts.join(', ')}. Core middleware includes helmet, CORS, JSON body parsing, URL encoding, static file serving, and rate limiting.`,
     })];
   }
 
-  _publicTextChunks(relPath, title, text) {
+  _helpTextChunks(relPath, title, text) {
     const clean = normalizeText(text).slice(0, MAX_CHUNK_CHARS);
     if (!clean) return [];
-    return [this._makeChunk({ title, sourcePath: relPath, audience: 'public', text: clean })];
+    return [this._makeChunk({ title, sourcePath: relPath, sourceLabel: title, audience: 'help', text: clean })];
+  }
+
+  _workflowHelpChunks(relPath, text) {
+    const statusesMatch = text.match(/const ALL_STATUSES = \[([\s\S]*?)\];/);
+    const statuses = statusesMatch
+      ? [...statusesMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1])
+      : [];
+    const safeStatusText = statuses.length
+      ? `Workflow statuses include: ${statuses.join(', ')}.`
+      : 'Workflow records move through submitted, review, approval, signature, storage, closure, hold, and cancellation states.';
+
+    return [this._makeChunk({
+      title: 'Legal workflow help',
+      sourcePath: relPath,
+      sourceLabel: 'Workflow help',
+      audience: 'help',
+      text: [
+        safeStatusText,
+        'Operational due dates use dueDate. targetDate is the original calculated target date and may differ when dueDate is overridden.',
+        'Signature progress is tracked with signatureEmailSentAt, pendingSignatoriesCount, completedSignatoriesCount, isFullySigned, and fullySignedAt.',
+        'Workflow history records status, holder, assignment, due-date, document, task, signature, and comment events as a timeline.',
+        'Live workflow records must be accessed through AI tools so RBAC and DataScope filters can be applied.',
+      ].join(' '),
+    })];
+  }
+
+  _slaHelpChunks(relPath, text) {
+    const entries = [...text.matchAll(/([A-Z_]+):\s*(\d+)/g)]
+      .map((match) => `${match[1]}=${match[2]}`);
+    return [this._makeChunk({
+      title: 'Legal workflow SLA help',
+      sourcePath: relPath,
+      sourceLabel: 'Workflow SLA help',
+      audience: 'help',
+      text: `Central legal workflow SLA thresholds: ${entries.join(', ')}. External turnaround is met when a request is completed or sent for signature within the configured threshold; signature completion is tracked separately.`,
+    })];
+  }
+
+  _signingHelpChunks(relPath, text) {
+    const statuses = [...new Set([...text.matchAll(/'([A-Z_]+)'/g)]
+      .map((match) => match[1])
+      .filter((value) => ['DRAFT', 'SENT', 'PARTIALLY_SIGNED', 'FULLY_SIGNED', 'EXPIRED', 'CANCELLED', 'PENDING', 'EMAIL_SENT', 'VIEWED', 'SIGNED', 'DECLINED'].includes(value)))];
+    return [this._makeChunk({
+      title: 'Signing process help',
+      sourcePath: relPath,
+      sourceLabel: 'Signing help',
+      audience: 'help',
+      text: [
+        'Signing is tracked through signature requests, signatories, documents, and workflow status fields.',
+        statuses.length ? `Signing statuses include: ${statuses.join(', ')}.` : '',
+        'Safe AI answers may include document title, signature status, signedAt, signatureEmailSentAt, pending signatory counts, and reminder timing.',
+        'Secure signing links, signing tokens, raw evidence packages, IP addresses, device fingerprints, and certificate internals must not be exposed through AI responses.',
+      ].filter(Boolean).join(' '),
+    })];
   }
 
   _chunkSourceFile(relPath, text) {
@@ -335,7 +405,7 @@ class BackendKnowledgeRagService {
       chunks.push(this._makeChunk({
         title: `${relPath} source part ${part}`,
         sourcePath: relPath,
-        audience: 'internal',
+        audience: 'source',
         text: clean.slice(cursor, end),
       }));
       if (end >= clean.length) break;
@@ -346,7 +416,7 @@ class BackendKnowledgeRagService {
     return chunks;
   }
 
-  _makeChunk({ title, sourcePath, audience, text }) {
+  _makeChunk({ title, sourcePath, sourceLabel, audience, text }) {
     const sanitized = sanitizeRetrievedSnippet(text, {
       maxChars: MAX_CHUNK_CHARS,
       redactPii: false,
@@ -355,6 +425,7 @@ class BackendKnowledgeRagService {
     return {
       title,
       sourcePath,
+      sourceLabel,
       audience,
       text: sanitized.text,
       securityFlags: sanitized.securityFlags,
@@ -370,12 +441,16 @@ class BackendKnowledgeRagService {
 
     const queryText = String(query || '').toLowerCase().trim();
     if (queryText && haystack.includes(queryText)) score += 4;
-    if (chunk.audience === 'public') score += 1;
+    if (chunk.audience === 'help' && score > 0) score += 1;
     if (/route|endpoint|api/.test(queryText) && chunk.sourcePath.includes('routes/')) score += 4;
     if (/model|schema|field|database/.test(queryText) && chunk.sourcePath.includes('models/')) score += 4;
     if (/permission|role|rbac/.test(queryText) && chunk.sourcePath.includes('rbac')) score += 4;
 
     return score;
+  }
+
+  _canUseAnyBackendRag(user) {
+    return this._policy.canUseBackendRag(user, 'help') || this._policy.canUseBackendRag(user, 'source');
   }
 }
 

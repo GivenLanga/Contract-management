@@ -43,6 +43,45 @@ const uploadRequest = async (endpoint, formData) => {
   return data;
 };
 
+const filenameFromDisposition = (value) => {
+  const header = String(value || '');
+  const utfMatch = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utfMatch) return decodeURIComponent(utfMatch[1].replace(/"/g, ''));
+  const match = header.match(/filename="?([^";]+)"?/i);
+  return match ? match[1] : '';
+};
+
+const fileRequest = async (endpoint) => {
+  const token = getToken();
+  const headers = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(`${BASE_URL}${endpoint}`, { headers });
+
+  if (res.status === 401) {
+    localStorage.removeItem('clm_token');
+    localStorage.removeItem('clm_user');
+    window.location.href = '/login';
+    return null;
+  }
+
+  if (!res.ok) {
+    const message = await res.text();
+    let data;
+    try {
+      data = JSON.parse(message);
+    } catch {
+      data = null;
+    }
+    throw new Error(data?.error || message || 'Download failed');
+  }
+
+  return {
+    blob: await res.blob(),
+    filename: filenameFromDisposition(res.headers.get('Content-Disposition')),
+  };
+};
+
 export const auth = {
   login: (email, password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   register: (data) => request('/auth/register', { method: 'POST', body: JSON.stringify(data) }),
@@ -61,8 +100,9 @@ export const contracts = {
 };
 
 export const tasks = {
-  list: (params = {}) => request(`/tasks?${new URLSearchParams(params)}`),
-  get: (id) => request(`/tasks/${id}`),
+  list:   (params = {}) => request(`/tasks?${new URLSearchParams(params)}`),
+  get:    (id) => request(`/tasks/${id}`),
+  stats:  () => request('/tasks/stats'),
   create: (data) => request('/tasks', { method: 'POST', body: JSON.stringify(data) }),
   update: (id, data) => request(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   delete: (id) => request(`/tasks/${id}`, { method: 'DELETE' }),
@@ -98,7 +138,11 @@ export const signing = {
   getSignatures: (docId) => request(`/signing/${docId}/signatures`),
   sign: (docId, data) => request(`/signing/${docId}/sign`, { method: 'POST', body: JSON.stringify(data) }),
   requestSigning: (docId, data) => request(`/signing/${docId}/request`, { method: 'POST', body: JSON.stringify(data) }),
+  ronSession: (docId, data) => request(`/signing/${docId}/ron/session`, { method: 'POST', body: JSON.stringify(data) }),
+  ronRecording: (docId, formData) => uploadRequest(`/signing/${docId}/ron/recording`, formData),
+  ronStamp: (docId, formData) => uploadRequest(`/signing/${docId}/ron/stamp`, formData),
   auditTrail: (docId) => request(`/signing/${docId}/audit-trail`),
+  completionCertificate: (docId) => fileRequest(`/signing/${docId}/completion-certificate`),
   remind: (docId, signerEmail) => request(`/signing/${docId}/remind/${encodeURIComponent(signerEmail)}`, { method: 'POST', body: JSON.stringify({}) }),
   reject: (docId, reason) => request(`/signing/${docId}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   metadata: (docId) => request(`/signing/${docId}/metadata`),
@@ -144,6 +188,22 @@ export const reports = {
   contracts: () => request('/reports/contracts'),
   audit: (params = {}) => request(`/reports/audit?${new URLSearchParams(params)}`),
   kpis: () => request('/reports/kpis'),
+  summary: (params = {}) => request(`/reports/summary?${new URLSearchParams(params)}`),
+};
+
+export const legalRequests = {
+  list:              (params = {}) => request(`/legal-requests?${new URLSearchParams(params)}`),
+  get:               (id) => request(`/legal-requests/${id}`),
+  create:            (data) => request('/legal-requests', { method: 'POST', body: JSON.stringify(data) }),
+  update:            (id, data) => request(`/legal-requests/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  updateStatus:      (id, status, comment) => request(`/legal-requests/${id}/status`, { method: 'PUT', body: JSON.stringify({ status, comment }) }),
+  assign:            (id, assignedTo) => request(`/legal-requests/${id}/assign`, { method: 'PUT', body: JSON.stringify({ assignedTo }) }),
+  overrideDueDate:   (id, dueDate, reason) => request(`/legal-requests/${id}/override-due-date`, { method: 'PUT', body: JSON.stringify({ dueDate, reason }) }),
+  managerDashboard:  () => request('/legal-requests/dashboard/manager'),
+  memberDashboard:   () => request('/legal-requests/dashboard/member'),
+  workflowDashboard: () => request('/legal-requests/workflow-dashboard'),
+  transitions:       (status) => request(`/legal-requests/transitions/${encodeURIComponent(status)}`),
+  delete:            (id) => request(`/legal-requests/${id}`, { method: 'DELETE' }),
 };
 
 export const fileUrl = (filename) => `/${filename}`;

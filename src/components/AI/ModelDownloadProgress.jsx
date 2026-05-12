@@ -77,6 +77,9 @@ export default function ModelDownloadProgress({ status, onCancel, busy }) {
   const barClass = isDownloading
     ? `ai-progress-fill ai-progress-fill--${stallState}`
     : 'ai-progress-fill';
+  const source = status?.modelSource === 'huggingface_download'
+    ? 'Hugging Face download'
+    : status?.modelSource || 'local model source';
 
   return (
     <div className="ai-setup-card ai-setup-card--progress">
@@ -88,9 +91,10 @@ export default function ModelDownloadProgress({ status, onCancel, busy }) {
               ? 'Download interrupted — retrying automatically…'
               : stallState === 'resumed'
               ? 'Download resumed'
-              : 'Downloading local AI model…'
+              : `Downloading local AI model from ${source}…`
             : status?.message || 'Preparing local AI…'}
         </h2>
+        <p>Inference will run locally through {status?.runtime || 'the local runtime'}. Cloud AI is {status?.cloudEnabled ? 'enabled' : 'disabled'}.</p>
       </div>
 
       {isDownloading ? (

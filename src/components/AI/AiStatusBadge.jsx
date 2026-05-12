@@ -9,6 +9,7 @@ const STATUS_LABELS = {
   starting: 'Starting local AI',
   ready: 'Local AI ready',
   error: 'AI unavailable',
+  failed: 'Local AI failed',
   disabled: 'AI disabled',
 };
 

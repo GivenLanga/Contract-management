@@ -14,9 +14,7 @@ const STATUS_BADGE = {
   Declined:             { cls: 'sd-badge--declined', label: 'Declined' },
 };
 
-const isMongoId = (value) => /^[a-f\d]{24}$/i.test(String(value || ''));
-const isReadyForEnvelope = (doc) =>
-  ['Ready for Signature', 'Approved', 'Draft'].includes(doc?.status);
+const isReadyForEnvelope = (doc) => doc?.status === 'Ready for Signature';
 const envelopeRoute = (docId, mode) => `/signing/envelope/${docId}?mode=${mode}`;
 
 const SIGNER_STATUS_META = {
@@ -117,8 +115,8 @@ export default function SigningDashboard() {
     const filled = doc.signingFields?.filter((f) => f.filled).length || 0;
     const hasSingerList = Array.isArray(doc.signers) && doc.signers.length > 0;
     const openRoute = `/signing/view/${doc._id}`;
+    const signRoute = `/signing/view/${doc._id}?mode=sign`;
     const prepareRoute = envelopeRoute(doc._id, 'prepare');
-    const serverBacked = isMongoId(doc._id);
 
     return (
       <div className="sd-card" onClick={() => navigate(openRoute)}>
@@ -194,7 +192,7 @@ export default function SigningDashboard() {
             className="sd-btn sd-btn--view"
             onClick={() => navigate(openRoute)}
           >
-            {showPrepareBtn ? 'View Document' : 'Open Signing Room'}
+            View Document
           </button>
           {showPrepareBtn && (
             <button
@@ -207,15 +205,15 @@ export default function SigningDashboard() {
           {showSignBtn && doc.status !== 'Signed' && (
             <button
               className="sd-btn sd-btn--sign"
-              onClick={() => navigate(`/signing/view/${doc._id}`)}
+              onClick={() => navigate(signRoute)}
             >
               ✍️ Sign Now
             </button>
           )}
-          {isManager && doc.status !== 'Signed' && (
+          {isManager && (
             <button
               className="sd-btn sd-btn--audit"
-              onClick={() => navigate(`/signing/view/${doc._id}`)}
+              onClick={() => navigate(`/signing/view/${doc._id}?panel=activity`)}
             >
               Audit Trail
             </button>

@@ -196,6 +196,230 @@
 }
 .env-add-btn:hover { background: #1a2744; color: #fff; border-color: #1a2744; }
 
+.env-trail-control {
+  position: relative;
+  margin-bottom: 16px;
+}
+.env-trail-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1.5px solid #d9e1ec;
+  border-radius: 8px;
+  background: #fff;
+  color: #1f2937;
+  cursor: pointer;
+  text-align: left;
+}
+.env-trail-button span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.env-trail-button strong {
+  font-size: 13px;
+  color: #1a2744;
+}
+.env-trail-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1.5px solid #d9e1ec;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 16px 36px rgba(15,23,42,.16);
+}
+.env-trail-option {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px;
+  border: 1.5px solid transparent;
+  border-radius: 8px;
+  background: #f8fafc;
+  cursor: pointer;
+  text-align: left;
+}
+.env-trail-option span {
+  color: #1f2937;
+  font-size: 13px;
+  font-weight: 800;
+}
+.env-trail-option small {
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.env-trail-option--active {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.env-ron-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1.5px solid #bfdbfe;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+
+.env-ron-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.env-ron-head h3 {
+  margin: 0 0 4px;
+  color: #1a2744;
+  font-size: 15px;
+}
+
+.env-ron-head p {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.env-ron-head span {
+  flex-shrink: 0;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.env-ron-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.env-ron-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.env-ron-identity > span {
+  color: #4b5563;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.env-ron-choice-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.env-ron-choice {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 78px;
+  padding: 10px;
+  border: 1.5px solid #d9e1ec;
+  border-radius: 8px;
+  background: #fff;
+  color: #1f2937;
+  cursor: pointer;
+  text-align: left;
+}
+
+.env-ron-choice strong {
+  font-size: 12px;
+  color: #1a2744;
+}
+
+.env-ron-choice small,
+.env-ron-identity p {
+  margin: 0;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.env-ron-choice--active {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.env-ron-warning {
+  padding: 10px 12px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.env-ron-session-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1.5px solid #d9e1ec;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.env-ron-session-head,
+.env-ron-session-actions,
+.env-ron-recording-row,
+.env-ron-identity-list {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.env-ron-session-head {
+  justify-content: space-between;
+}
+
+.env-ron-session-head h3 {
+  margin: 0 0 3px;
+  color: #1a2744;
+  font-size: 14px;
+}
+
+.env-ron-session-head p,
+.env-ron-identity-list span {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.env-ron-recording-row input {
+  flex: 1;
+  min-width: 240px;
+  padding: 9px 11px;
+  border: 1.5px solid #d1d5db;
+  border-radius: 8px;
+  background: #fff;
+  color: #111827;
+}
+
 .env-signers-list { display: flex; flex-direction: column; gap: 14px; }
 
 .env-signer-row {
@@ -676,6 +900,60 @@
   cursor: grabbing;
 }
 
+.env-align-guide {
+  --guide-color: #f59e0b;
+  position: absolute;
+  pointer-events: none;
+  z-index: 12;
+  filter: drop-shadow(0 0 2px color-mix(in srgb, var(--guide-color) 44%, transparent));
+}
+.env-align-guide--vertical {
+  width: 0;
+  border-left: 2px dashed var(--guide-color);
+}
+.env-align-guide--horizontal {
+  height: 0;
+  border-top: 2px dashed var(--guide-color);
+}
+.env-align-guide--aligned {
+  --guide-color: #16a34a;
+}
+.env-align-guide--vertical.env-align-guide--aligned {
+  border-left-style: solid;
+}
+.env-align-guide--horizontal.env-align-guide--aligned {
+  border-top-style: solid;
+}
+.env-align-guide--warning {
+  --guide-color: #f59e0b;
+}
+.env-align-guide--right {
+  border-left-width: 3px;
+}
+.env-align-guide--bottom {
+  border-top-width: 3px;
+}
+.env-align-guide--vertical::before,
+.env-align-guide--vertical::after,
+.env-align-guide--horizontal::before,
+.env-align-guide--horizontal::after {
+  content: "";
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--guide-color);
+  box-shadow: 0 0 0 2px rgba(255,255,255,.88);
+}
+.env-align-guide--vertical::before,
+.env-align-guide--vertical::after { left: -5px; }
+.env-align-guide--vertical::before { top: -4px; }
+.env-align-guide--vertical::after { bottom: -4px; }
+.env-align-guide--horizontal::before,
+.env-align-guide--horizontal::after { top: -5px; }
+.env-align-guide--horizontal::before { left: -4px; }
+.env-align-guide--horizontal::after { right: -4px; }
+
 /* ── Field boxes ─────────────────────────────────────────────────────────── */
 .env-fbox {
   position: absolute;
@@ -692,6 +970,7 @@
   transition: box-shadow .1s;
   overflow: hidden;
   box-sizing: border-box;
+  z-index: 5;
 }
 .env-fbox:hover {
   box-shadow: 0 2px 12px color-mix(in srgb, var(--fc, #2563eb) 45%, transparent);
@@ -701,6 +980,22 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--fc, #2563eb) 30%, transparent);
   z-index: 10;
   cursor: grabbing;
+}
+.env-fbox--overlap {
+  --fc: #dc2626 !important;
+  background: rgba(254, 226, 226, .82);
+  border-style: solid;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, .18);
+}
+.env-fbox--misaligned {
+  --fc: #d97706 !important;
+  background: rgba(254, 243, 199, .82);
+  border-style: dashed;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, .18);
+}
+.env-fbox--overlap.env-fbox--misaligned {
+  --fc: #dc2626 !important;
+  background: rgba(254, 226, 226, .86);
 }
 
 .env-fbox-icon {
@@ -758,31 +1053,6 @@
   cursor: nwse-resize;
   touch-action: none;
 }
-.env-fbox-assignee {
-  position: absolute;
-  left: 4px;
-  right: 16px;
-  bottom: 3px;
-  height: 17px;
-  min-width: 0;
-  border: 1px solid color-mix(in srgb, var(--fc, #2563eb) 55%, #cbd5e1);
-  border-radius: 3px;
-  background: #fff;
-  color: #111827;
-  font: 600 10px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  cursor: pointer;
-  z-index: 19;
-  pointer-events: auto;
-  padding: 0 3px;
-}
-.env-fbox--signature.env-fbox--sel .env-fbox-label {
-  position: absolute;
-  top: 4px;
-  left: 6px;
-  right: 6px;
-  text-align: center;
-}
-
 /* Type-specific styling */
 .env-fbox--signature {
   background: color-mix(in srgb, var(--fc) 10%, #fff);
@@ -1254,4 +1524,104 @@
   font-size: 12px;
   color: #64748b;
   margin-top: 2px;
+}
+.env-dev-waiting {
+  flex: 0 0 auto;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  color: #64748b;
+  background: #f8fafc;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+@media (max-width: 760px) {
+  .env-ron-grid,
+  .env-ron-choice-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* SA Notarization — section labels */
+.env-ron-section-label {
+  margin: 6px 0 2px;
+  color: #2563eb;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+/* SA Notarization — scheduling */
+.env-ron-schedule { display: flex; flex-direction: column; gap: 8px; }
+
+/* SA Notarization — notary workflow steps */
+.env-ron-workflow {
+  display: flex;
+  gap: 0;
+  overflow-x: auto;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+.env-ron-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 80px;
+  padding: 10px 6px 8px;
+  border-right: 1px solid #e2e8f0;
+  color: #94a3b8;
+  font-size: 11px;
+  text-align: center;
+  transition: background .15s;
+}
+.env-ron-step:last-child { border-right: none; }
+.env-ron-step span {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #e2e8f0;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 3px;
+}
+.env-ron-step--done {
+  color: #166534;
+  background: #f0fdf4;
+}
+.env-ron-step--done span {
+  background: #22c55e;
+  color: #fff;
+}
+
+/* SA Notarization — stamp upload */
+.env-ron-stamp-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1.5px dashed #d1d5db;
+  border-radius: 8px;
+  background: #fafafa;
+}
+.env-ron-stamp-label { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.env-ron-stamp-label strong { font-size: 13px; color: #1a2744; }
+.env-ron-stamp-label span { font-size: 12px; color: #64748b; }
+.env-ron-stamp-ok {
+  color: #166534;
+  font-size: 12px;
+  font-weight: 600;
 }

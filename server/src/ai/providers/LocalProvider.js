@@ -25,8 +25,15 @@ class LocalProvider extends AIModelProvider {
   }
 
   async generate(input) {
-    await this._manager.ensureReady();
-    return this._manager.getRuntimeClient().generate(input);
+    try {
+      await this._manager.ensureReady();
+      return this._manager.getRuntimeClient().generate(input);
+    } catch (err) {
+      if (process.env.ALLOW_CLOUD_AI !== 'true') {
+        throw new Error(`Local model is not ready. Cloud AI is disabled, so no remote provider was used. ${err.message}`);
+      }
+      throw err;
+    }
   }
 
   async healthCheck() {

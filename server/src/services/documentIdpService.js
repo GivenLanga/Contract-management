@@ -22,6 +22,7 @@ const SIGNATURE_WORDS = /\b(sign|signature|signed by|sign here|authorized signat
 const DATE_WORDS = /\b(date|dated)\b/i;
 const INITIAL_WORDS = /\b(initial|initials)\b/i;
 const NAME_WORDS = /\b(print name|printed name|name)\b/i;
+const PLACE_WORDS = /\b(place|place of signing|place of signature|execution place)\b/i;
 const CHECKBOX_WORDS = /\b(check\s*box|checkbox|tick\s*box|consent|agree|acknowledge)\b/i;
 const RADIO_WORDS = /\b(radio|option)\b/i;
 const DROPDOWN_WORDS = /\b(drop\s*down|dropdown|select)\b/i;
@@ -31,7 +32,7 @@ const SIGNATURE_LINE_WORDS = /\b(sign|signature|sign here|signed by|authorized s
 const EXECUTION_PLACE_WORDS = /\bsigned\s+at\b/i;
 const SIGNED_ON_RE = /\bsigned\s+on\b/i;
 const EXEC_BLOCK_HEADER_RE = /^(?:for(?:\s+and\s+on\s+behalf\s+of)?|signed\s+(?:by|for)|executed\s+(?:by|for)|on\s+behalf\s+of)\s*:/i;
-const FIELD_LINE_RE = /_{3,}|^(?:signature|date|name|initial|title|designation|designatation|position|capacity|address|witness)\s*:/i;
+const FIELD_LINE_RE = /_{3,}|^(?:signature|date|name|place|initial|title|designation|designatation|position|capacity|address|witness)\s*:/i;
 // Matches any fragment of a "dated at ___ on this ___ day of ___ 20___" clause.
 // Each fragment in its own table cell also needs to be detected independently.
 const INLINE_DATE_CLAUSE_RE = /\bdated\s+at\b|\bday\s+of\b|\bon\s+this\b/i;
@@ -39,8 +40,8 @@ const DAY_OF_DATE_RE = /\bday\s+of\b/i;
 const ON_THIS_DATE_RE = /\bon\s+this\b/i;
 // Matches a year stub like "20___" — the trailing blank of an execution date clause.
 const YEAR_STUB_RE = /\b(?:19|20)\d{0,2}[\s_]/;
-const TEXT_LINE_WORDS = /\b(full name|print name|printed name|name|title|designation|designatation|position|capacity)\b/i;
-const NON_SIGNATURE_FIELD_WORDS = /\b(full name|print name|printed name|name|capacity|title|designation|designatation|position|address)\b\s*:?/i;
+const TEXT_LINE_WORDS = /\b(full name|print name|printed name|name|place|place of signing|place of signature|execution place|title|designation|designatation|position|capacity)\b/i;
+const NON_SIGNATURE_FIELD_WORDS = /\b(full name|print name|printed name|name|place|capacity|title|designation|designatation|position|address)\b\s*:?/i;
 const TEXT_WORD_PATTERN = /\b[A-Za-z][A-Za-z0-9'-]*\b/g;
 const EXPLICIT_SIGNATURE_CUE_RE = /\b(sign\s+here|signed\s+by|for\s+and\s+on\s+behalf|authori[sz]ed\s+signatory)\b/i;
 const SIGNATURE_LABEL_RE = /(?:^|\s)(?:signature|sign|signatory)\s*(?::|_|\s*$)/i;
@@ -72,6 +73,7 @@ const inferFieldType = (label = '') => {
   if (CHECKBOX_WORDS.test(label)) return 'checkbox';
   if (RADIO_WORDS.test(label)) return 'radio';
   if (DROPDOWN_WORDS.test(label)) return 'dropdown';
+  if (PLACE_WORDS.test(label)) return 'text';
   if (NAME_WORDS.test(label)) return 'text';
   return 'signature';
 };
@@ -990,9 +992,16 @@ const resolveFieldOverlaps = (fields) => {
         const lowerTop = lower.y + lower.height;
         if (lowerTop > upper.y) {
           const available = upper.y - lower.y - 2; // 2 px breathing room
-          // 8 px absolute floor — type-specific minH must not force the box
-          // above the available space and re-introduce the overlap.
-          lower.height = Math.max(8, available);
+          // Keep the layout non-overlapping even in extremely tight signing
+          // stacks. A later cleanup pass removes fields that become too short
+          // to be usable instead of letting hidden required fields leak through.
+          lower.height = Math.max(0, available);
+          if (lower.height < 8) {
+            lower.detection = {
+              ...(lower.detection || {}),
+              layoutTooTight: true,
+            };
+          }
         }
       }
     }
@@ -1569,6 +1578,207 @@ const looksLikeSameFieldPosition = (a, b) => {
     widthDelta <= Math.max(16, Math.max(a.width, b.width) * 0.15);
 };
 
+const FIELD_LAYOUT_TYPE_PRIORITY = {
+  signature: 90,
+  initials: 84,
+  date: 76,
+  number: 68,
+  checkbox: 64,
+  radio: 64,
+  dropdown: 64,
+  text: 54,
+};
+const SAME_SPACE_OVERLAP_RATIO = 0.58;
+const SAME_ROW_OVERLAP_RATIO = 0.30;
+const HIDDEN_TEXT_OVERLAP_RATIO = 0.48;
+const MIN_USABLE_FIELD_HEIGHT = 8;
+
+const fieldArea = (field) =>
+  Math.max(0, finiteNumber(field.width, 0)) * Math.max(0, finiteNumber(field.height, 0));
+
+const fieldOverlapDetails = (a, b) => {
+  if (a.page !== b.page) {
+    return {
+      area: 0,
+      minRatio: 0,
+      aRatio: 0,
+      bRatio: 0,
+      xRatioMin: 0,
+      yRatioMin: 0,
+    };
+  }
+
+  const xOverlap = rangesOverlap(a.x, a.x + a.width, b.x, b.x + b.width);
+  const yOverlap = rangesOverlap(a.y, a.y + a.height, b.y, b.y + b.height);
+  const area = xOverlap * yOverlap;
+  const aArea = fieldArea(a) || 1;
+  const bArea = fieldArea(b) || 1;
+  const minArea = Math.min(aArea, bArea) || 1;
+  const minWidth = Math.min(a.width, b.width) || 1;
+  const minHeight = Math.min(a.height, b.height) || 1;
+
+  return {
+    area,
+    minRatio: area / minArea,
+    aRatio: area / aArea,
+    bRatio: area / bArea,
+    xRatioMin: xOverlap / minWidth,
+    yRatioMin: yOverlap / minHeight,
+  };
+};
+
+const fieldSemanticCueScore = (field = {}) => {
+  const context = `${field.context || ''} ${field.anchor || ''} ${field.name || ''} ${field.detection?.lineText || ''}`;
+  let score = 0;
+
+  if (field.type === 'signature' && SIGNATURE_LINE_WORDS.test(context) && !NON_SIGNATURE_FIELD_WORDS.test(context)) score += 20;
+  if (field.type === 'date' && (DATE_WORDS.test(context) || SIGNED_ON_RE.test(context))) score += 18;
+  if (field.type === 'text' && (TEXT_LINE_WORDS.test(context) || PLACE_WORDS.test(context) || EXECUTION_PLACE_WORDS.test(context))) score += 16;
+  if (field.type === 'initials' && INITIAL_WORDS.test(context)) score += 14;
+
+  if (field.type === 'text' && DATE_WORDS.test(context) && !TEXT_LINE_WORDS.test(context) && !PLACE_WORDS.test(context)) score -= 16;
+  if (field.type === 'signature' && NON_SIGNATURE_FIELD_WORDS.test(context)) score -= 24;
+
+  return score;
+};
+
+const fieldLayoutScore = (field = {}) =>
+  (SOURCE_PRIORITY[field.source] || 0) +
+  (FIELD_LAYOUT_TYPE_PRIORITY[field.type] || 0) +
+  fieldSemanticCueScore(field) +
+  finiteNumber(field.confidence, 0.5) * 20;
+
+const sameVisualRow = (a, b, details) => {
+  const centerDelta = Math.abs((a.y + a.height / 2) - (b.y + b.height / 2));
+  const minHeight = Math.min(a.height, b.height) || 1;
+  return centerDelta <= Math.max(5, minHeight * 0.45) || details.yRatioMin >= 0.72;
+};
+
+const fieldsCompeteForSameSpace = (a, b) => {
+  const details = fieldOverlapDetails(a, b);
+  if (!details.area) return false;
+
+  if (details.minRatio >= SAME_SPACE_OVERLAP_RATIO) return true;
+
+  const sameRow = sameVisualRow(a, b, details);
+  if (sameRow && details.minRatio >= SAME_ROW_OVERLAP_RATIO && details.xRatioMin >= 0.5) return true;
+
+  const aIsText = a.type === 'text';
+  const bIsText = b.type === 'text';
+  if (aIsText !== bIsText && details.xRatioMin >= 0.45 && details.yRatioMin >= 0.35) {
+    const textRatio = aIsText ? details.aRatio : details.bRatio;
+    return textRatio >= HIDDEN_TEXT_OVERLAP_RATIO;
+  }
+
+  return false;
+};
+
+const overlappingFieldLabel = (field = {}) =>
+  field.id || `${field.type || 'field'}:${field.page || 1}:${Math.round(field.x || 0)}:${Math.round(field.y || 0)}`;
+
+const collapseOverlappingDetectedFields = (fields = []) => {
+  const ordered = [...fields].sort((a, b) =>
+    fieldLayoutScore(b) - fieldLayoutScore(a) ||
+    fieldArea(a) - fieldArea(b) ||
+    a.page - b.page ||
+    b.y - a.y ||
+    a.x - b.x
+  );
+  const kept = [];
+  const removed = [];
+
+  for (const field of ordered) {
+    const overlappingField = kept.find((item) => fieldsCompeteForSameSpace(item, field));
+    if (overlappingField) {
+      removed.push({
+        id: field.id,
+        type: field.type,
+        source: field.source,
+        detector: field.detection?.detector || field.detector,
+        overlappedBy: overlappingFieldLabel(overlappingField),
+      });
+      continue;
+    }
+    kept.push(field);
+  }
+
+  return { fields: kept, removed };
+};
+
+const fieldLayoutOrder = (a, b) =>
+  a.page - b.page || b.y - a.y || a.x - b.x;
+
+const removeUnusableDetectedFields = (fields = []) => {
+  const kept = [];
+  const removed = [];
+
+  for (const field of fields) {
+    if (field.height < MIN_USABLE_FIELD_HEIGHT || field.width < 16) {
+      removed.push({
+        id: field.id,
+        type: field.type,
+        source: field.source,
+        detector: field.detection?.detector || field.detector,
+        reason: field.height < MIN_USABLE_FIELD_HEIGHT ? 'too-tight-after-overlap-resolution' : 'too-narrow',
+      });
+      continue;
+    }
+    kept.push(field);
+  }
+
+  return { fields: kept, removed };
+};
+
+const findDetectedFieldOverlaps = (fields = []) => {
+  const issues = [];
+  for (let i = 0; i < fields.length; i += 1) {
+    for (let j = i + 1; j < fields.length; j += 1) {
+      const details = fieldOverlapDetails(fields[i], fields[j]);
+      if (
+        details.area > 0.5 &&
+        details.minRatio >= 0.02 &&
+        details.xRatioMin >= 0.2 &&
+        details.yRatioMin >= 0.08
+      ) {
+        issues.push({
+          fieldA: overlappingFieldLabel(fields[i]),
+          fieldB: overlappingFieldLabel(fields[j]),
+          page: fields[i].page,
+          overlapRatio: Number(details.minRatio.toFixed(3)),
+        });
+      }
+    }
+  }
+  return issues;
+};
+
+const finalizeDetectedFieldLayout = (fields = []) => {
+  const working = fields.map((field) => ({
+    ...field,
+    detection: { ...(field.detection || {}) },
+  }));
+
+  const firstCollapse = collapseOverlappingDetectedFields(working);
+  const clipped = resolveFieldOverlaps(firstCollapse.fields);
+  const visible = removeUnusableDetectedFields(clipped);
+  const secondCollapse = collapseOverlappingDetectedFields(visible.fields);
+  const finalFields = resolveFieldOverlaps(secondCollapse.fields)
+    .sort(fieldLayoutOrder);
+  const finalVisible = removeUnusableDetectedFields(finalFields);
+  const overlaps = findDetectedFieldOverlaps(finalVisible.fields);
+
+  return {
+    fields: finalVisible.fields,
+    removedFields: [
+      ...firstCollapse.removed,
+      ...visible.removed,
+      ...secondCollapse.removed,
+      ...finalVisible.removed,
+    ],
+    overlaps,
+  };
+};
+
 const mergeFields = (fields, pageMetrics) => {
   const normalized = fields
     .map((field) => normalizePdfField(field, pageMetrics))
@@ -1578,7 +1788,7 @@ const mergeFields = (fields, pageMetrics) => {
   for (const field of normalized) {
     const duplicate = merged.find((item) =>
       item.type === field.type &&
-      (overlapRatio(item, field) > 0.35 || looksLikeSameFieldPosition(item, field))
+      (looksLikeSameFieldPosition(item, field) || fieldsCompeteForSameSpace(item, field))
     );
     if (!duplicate) merged.push(field);
   }
@@ -2272,11 +2482,26 @@ const prepareSigningDocument = async ({ doc, signers = [], strategy = {} }) => {
     });
   }
 
+  const finalizedLayout = finalizeDetectedFieldLayout(mergeFields(candidates, pageMetrics));
+  diagnostics.push({
+    provider: 'field-layout-sanitizer',
+    removedFields: finalizedLayout.removedFields.length,
+    remainingOverlaps: finalizedLayout.overlaps.length,
+    removedFieldTypes: finalizedLayout.removedFields.reduce((acc, field) => {
+      const key = field.type || 'unknown';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {}),
+  });
+
   const fields = assignFieldsToSigners(
-    resolveFieldOverlaps(mergeFields(candidates, pageMetrics)),
+    finalizedLayout.fields,
     signers,
   );
-  const reviewRequired = fields.some((field) => field.confidence < 0.75 || field.source === 'heuristic-default');
+  const reviewRequired =
+    fields.some((field) => field.confidence < 0.75 || field.source === 'heuristic-default') ||
+    finalizedLayout.removedFields.length > 0 ||
+    finalizedLayout.overlaps.length > 0;
   const fieldsHash = crypto.createHash('sha256').update(JSON.stringify(fields)).digest('hex');
 
   return {
@@ -2314,6 +2539,7 @@ module.exports = {
   detectLayoutFieldsWithPdfJs,
   getPdfPageMetrics,
   mergeFields,
+  finalizeDetectedFieldLayout,
   assignFieldsToSigners,
   buildMiddlePageInitialFields,
   textLayoutFieldsFromLines,

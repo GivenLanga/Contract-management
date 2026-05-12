@@ -34,7 +34,8 @@ class ToolCallParser {
   }
 
   _extractJsonCall(text, registry) {
-    // Look for {"type":"tool_call","toolName":"...","arguments":{...}} pattern
+    // Only accept {"type":"tool_call","toolName":"...",...} — strict match to avoid
+    // treating ordinary JSON (e.g. contract metadata with a "name" field) as a tool call.
     const start = text.indexOf('{');
     if (start === -1) return null;
 
@@ -46,9 +47,8 @@ class ToolCallParser {
         if (depth === 0) {
           try {
             const obj = JSON.parse(text.slice(start, i + 1));
-            const toolName = obj.toolName || obj.tool || obj.name;
-            if ((obj.type === 'tool_call' || toolName) && toolName && registry.get(toolName)) {
-              return { toolName, arguments: obj.arguments || obj.args || {} };
+            if (obj.type === 'tool_call' && obj.toolName && registry.get(obj.toolName)) {
+              return { toolName: obj.toolName, arguments: obj.arguments || {} };
             }
           } catch {}
           break;

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
-import { tasks as tasksApi } from '../../services/api';
+import { tasks as tasksApi, legalRequests as lrApi } from '../../services/api';
+import { TASK_TYPES } from './taskConstants';
 import './TaskForm.css';
 
 export default function TaskForm({ task, users, onClose, onSaved }) {
@@ -10,24 +11,33 @@ export default function TaskForm({ task, users, onClose, onSaved }) {
     deadline: '',
     priority: 'Medium',
     type: 'Other',
+    legalRequest: '',
     progressNote: '',
   });
+  const [legalRequests, setLegalRequests] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     if (task) {
       setForm({
-        title: task.title || '',
-        description: task.description || '',
-        assignedTo: task.assignedTo?._id || '',
-        deadline: task.deadline ? new Date(task.deadline).toISOString().slice(0, 16) : '',
-        priority: task.priority || 'Medium',
-        type: task.type || 'Other',
+        title:        task.title || '',
+        description:  task.description || '',
+        assignedTo:   task.assignedTo?._id || '',
+        deadline:     task.deadline ? new Date(task.deadline).toISOString().slice(0, 16) : '',
+        priority:     task.priority || 'Medium',
+        type:         task.type || 'Other',
+        legalRequest: task.legalRequest?._id || task.legalRequest || '',
         progressNote: task.progressNote || '',
       });
     }
   }, [task]);
+
+  useEffect(() => {
+    lrApi.list({ limit: 100 })
+      .then(d => setLegalRequests(d.requests || []))
+      .catch(() => {});
+  }, []);
 
   const handleChange = (e) => setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
 
@@ -36,10 +46,12 @@ export default function TaskForm({ task, users, onClose, onSaved }) {
     setError('');
     setLoading(true);
     try {
+      const payload = { ...form };
+      if (!payload.legalRequest) delete payload.legalRequest;
       if (task) {
-        await tasksApi.update(task._id, form);
+        await tasksApi.update(task._id, payload);
       } else {
-        await tasksApi.create(form);
+        await tasksApi.create(payload);
       }
       onSaved();
     } catch (err) {
@@ -70,6 +82,16 @@ export default function TaskForm({ task, users, onClose, onSaved }) {
             <textarea name="description" value={form.description} onChange={handleChange} rows={3} placeholder="Task details and instructions..." />
           </div>
 
+          <div className="form-field">
+            <label>Linked Legal Request</label>
+            <select name="legalRequest" value={form.legalRequest} onChange={handleChange}>
+              <option value="">None</option>
+              {legalRequests.map((lr) => (
+                <option key={lr._id} value={lr._id}>{lr.requestId} — {lr.title}</option>
+              ))}
+            </select>
+          </div>
+
           <div className="form-row">
             <div className="form-field">
               <label>Assign To *</label>
@@ -98,7 +120,9 @@ export default function TaskForm({ task, users, onClose, onSaved }) {
             <div className="form-field">
               <label>Task Type</label>
               <select name="type" value={form.type} onChange={handleChange}>
-                {['Drafting', 'Review', 'Approval', 'Signing', 'Negotiation', 'Other'].map((t) => <option key={t}>{t}</option>)}
+                {TASK_TYPES.map((t) => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
               </select>
             </div>
           </div>

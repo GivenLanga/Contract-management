@@ -7,9 +7,34 @@ import ModelDownloadProgress from './ModelDownloadProgress';
 import AiUnavailableCard from './AiUnavailableCard';
 import { syncLegalFolderRagIndex } from '../../services/legalFolderRagSync';
 import { syncSigningStateIndex } from '../../services/signingStateSync';
+import WorkflowSummaryCard from './WorkflowSummaryCard';
 import './AIAssistant.css';
 
 const SESSION_KEY = 'ai_session_id';
+const RAG_SYNC_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+let _lastRagSyncAt = 0;
+let _msgCounter = 0;
+const nextMsgId = () => `msg_${++_msgCounter}`;
+const STRUCTURED_SUMMARY_TYPES = new Set([
+  'workflow_summary',
+  'legal_request_summary',
+  'list_summary',
+  'field_answer',
+  'table_summary',
+  'contract_summary',
+  'contract_value_summary',
+  'contract_management_summary',
+  'task_summary',
+  'signing_summary',
+  'document_summary',
+  'report_summary',
+  'dashboard_summary',
+  'count_summary',
+  'unsupported_metadata',
+  'clarification_required',
+  'drafting_unavailable',
+  'tool_error',
+]);
 
 function getSessionId() {
   let sid = sessionStorage.getItem(SESSION_KEY);
@@ -22,6 +47,25 @@ function getSessionId() {
 
 function formatTime(d) {
   return new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function modelSourceLabel(value) {
+  if (value === 'huggingface_download') return 'Hugging Face download';
+  if (value === 'local_file') return 'local file';
+  return value || 'local source';
+}
+
+function localStatusSubtitle(status) {
+  if (status?.status === 'ready') {
+    return [
+      'Running locally',
+      `Model source: ${modelSourceLabel(status.modelSource)}`,
+      `Runtime: ${status.runtime || 'local runtime'}`,
+      `Cloud AI: ${status.cloudEnabled ? 'Enabled' : 'Disabled'}`,
+    ].join(' | ');
+  }
+
+  return 'Ask questions about your contracts, tasks, and documents';
 }
 
 function renderResultData(data) {
@@ -132,8 +176,8 @@ function renderResultData(data) {
         <div className="ai-results-label">
           Signers — {data.completedSigners}/{data.totalSigners} completed
         </div>
-        {data.signers.map((s, i) => (
-          <div key={i} className="ai-result-item">
+        {data.signers.map((s) => (
+          <div key={s.userId || s.email || s.name} className="ai-result-item">
             <span className="ai-result-icon" aria-hidden="true">{s.signed ? '✅' : '⏳'}</span>
             <div className="ai-result-details">
               <div className="ai-result-name">{s.name}</div>
@@ -152,8 +196,8 @@ function renderResultData(data) {
     return (
       <div className="ai-results">
         <div className="ai-results-label">{data.message}</div>
-        {data.capabilities.map((c, i) => (
-          <div key={i} className="ai-result-item ai-result-item--compact">
+        {data.capabilities.map((c) => (
+          <div key={c.description} className="ai-result-item ai-result-item--compact">
             <span className="ai-result-icon" aria-hidden="true">→</span>
             <div className="ai-result-details">
               <div className="ai-result-meta">{c.description}</div>
@@ -196,6 +240,7 @@ export default function AIAssistant() {
   const navigate = useNavigate();
   const [messages, setMessages] = useState([
     {
+      id: nextMsgId(),
       role: 'assistant',
       text: "Hello! I'm your AI legal assistant. I can help you search contracts, check expiring agreements, manage tasks, review signing status, read notifications, and navigate the app. What would you like to know?",
       timestamp: new Date(),
@@ -210,7 +255,9 @@ export default function AIAssistant() {
   const messagesEndRef          = useRef(null);
   const inputRef                = useRef(null);
   const startInFlightRef        = useRef(false);
-  const assistantReady          = aiStatus?.status === 'ready';
+  const autoStartAttemptedModelRef = useRef(null);
+  const navTimerRef             = useRef(null);
+  const assistantReady          = aiStatus?.status === 'ready' && aiStatus?.usesCloudInference !== true && aiStatus?.model?.ready !== false;
 
   const refreshAiStatus = useCallback(async () => {
     try {
@@ -230,8 +277,13 @@ export default function AIAssistant() {
 
   useEffect(() => {
     aiApi.suggestions().then((d) => setSuggestions(d.suggestions || [])).catch(() => {});
-    syncLegalFolderRagIndex().catch(() => {});
-    syncSigningStateIndex().catch(() => {});
+    const now = Date.now();
+    if (now - _lastRagSyncAt >= RAG_SYNC_INTERVAL_MS) {
+      _lastRagSyncAt = now;
+      syncLegalFolderRagIndex().catch(() => {});
+      syncSigningStateIndex().catch(() => {});
+    }
+    return () => { clearTimeout(navTimerRef.current); };
   }, []);
 
   useEffect(() => {
@@ -253,9 +305,11 @@ export default function AIAssistant() {
 
   useEffect(() => {
     if (aiStatus?.status !== 'installed' || startInFlightRef.current || !aiStatus.activeModelId) return;
+    if (autoStartAttemptedModelRef.current === aiStatus.activeModelId) return;
 
     let cancelled = false;
     startInFlightRef.current = true;
+    autoStartAttemptedModelRef.current = aiStatus.activeModelId;
     setStatusBusy(true);
     aiApi.start(aiStatus.activeModelId)
       .then((status) => {
@@ -280,6 +334,12 @@ export default function AIAssistant() {
   }, [aiStatus?.status, aiStatus?.activeModelId]);
 
   useEffect(() => {
+    if (aiStatus?.status === 'ready' || aiStatus?.status === 'not_installed' || aiStatus?.status === 'download_paused') {
+      autoStartAttemptedModelRef.current = null;
+    }
+  }, [aiStatus?.status]);
+
+  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
@@ -287,7 +347,7 @@ export default function AIAssistant() {
     if (inputRef.current) inputRef.current.style.height = 'auto';
   };
 
-  const pushMessage = (msg) => setMessages((prev) => [...prev, msg]);
+  const pushMessage = (msg) => setMessages((prev) => [...prev, { id: nextMsgId(), ...msg }]);
 
   const sendQuery = async (query) => {
     if (!query.trim() || loading || !assistantReady) return;
@@ -324,7 +384,7 @@ export default function AIAssistant() {
         navigationPath: result.data?.path,
         navigationLabel: result.data?.label,
       });
-      setTimeout(() => navigate(result.data.path), 600);
+      navTimerRef.current = setTimeout(() => navigate(result.data.path), 600);
       return;
     }
 
@@ -360,6 +420,16 @@ export default function AIAssistant() {
       return;
     }
 
+    if (STRUCTURED_SUMMARY_TYPES.has(result.type)) {
+      pushMessage({
+        role: 'assistant',
+        text: result.summary || result.message || result.title || 'Here are the results.',
+        timestamp: ts,
+        workflowSummary: result,
+      });
+      return;
+    }
+
     // success — may have structured data
     const summary = buildSummaryText(result);
     pushMessage({
@@ -371,8 +441,13 @@ export default function AIAssistant() {
   };
 
   const buildSummaryText = (result) => {
+    if (STRUCTURED_SUMMARY_TYPES.has(result.type)) {
+      return result.summary || result.message || result.title || 'Here are the results.';
+    }
     const d = result.data;
-    if (!d) return 'Done.';
+    if (!d) return result.message || 'Here are the results.';
+    if (d.mode === 'expired' && typeof d.count === 'number') return d.message || `${d.count} contract${d.count !== 1 ? 's have' : ' has'} expired.`;
+    if (d.mode === 'expiring' && typeof d.count === 'number' && d.days) return d.message || `${d.count} contract${d.count !== 1 ? 's' : ''} expiring within ${d.days} days.`;
     if (typeof d.count === 'number' && d.days) return `${d.count} contract${d.count !== 1 ? 's' : ''} expiring within ${d.days} days.`;
     if (d.message) return d.message;
     if (d.contracts?.length) return `Found ${d.contracts.length} contract${d.contracts.length !== 1 ? 's' : ''}.`;
@@ -382,7 +457,9 @@ export default function AIAssistant() {
     if (d.summary) return `${d.summary.title} — ${d.summary.status}, ${d.summary.value}`;
     if (d.title && d.parties) return `${d.title} — ${d.parties?.length || 0} parties.`;
     if (typeof d.count === 'number') return `Total: ${d.count}.`;
-    if (d.pending !== undefined) return `Tasks: ${d.pending} pending, ${d.inProgress} in progress, ${d.overdue} overdue.`;
+    if (d.pending !== undefined) {
+      return `Tasks: ${d.pending} pending, ${d.inProgress ?? 0} in progress, ${d.overdue ?? 0} overdue, ${d.completed ?? 0} completed.`;
+    }
     if (d.drafters?.length) return `${d.drafters.length} user${d.drafters.length !== 1 ? 's' : ''} currently drafting.`;
     return 'Here are the results:';
   };
@@ -515,11 +592,11 @@ export default function AIAssistant() {
       );
     }
 
-    if (aiStatus.status === 'error') {
+    if (['error', 'failed'].includes(aiStatus.status)) {
       // If a download was in progress when the error occurred, show the setup card
       // so the user gets a clear "Resume Download" button rather than a generic error card.
       const downloadError = /download|model|HTTP|stall|cancelled/i.test(aiStatus.error || aiStatus.message || '');
-      if (downloadError) {
+      if (aiStatus.status === 'error' && downloadError) {
         return (
           <LocalAiSetupCard
             status={{ ...aiStatus, status: 'download_paused' }}
@@ -550,9 +627,7 @@ export default function AIAssistant() {
         <div className="ai-header-text">
           <h1>AI Legal Assistant</h1>
           <p>
-            {assistantReady
-              ? `Model: ${aiStatus.activeModelDisplayName} | Mode: Local`
-              : 'Ask questions about your contracts, tasks, and documents'}
+            {assistantReady ? localStatusSubtitle(aiStatus) : 'Ask questions about your contracts, tasks, and documents'}
           </p>
         </div>
         <AiStatusBadge status={aiStatus} />
@@ -571,9 +646,9 @@ export default function AIAssistant() {
           aria-live="polite"
           aria-label="Conversation"
         >
-          {messages.map((msg, i) => (
+          {messages.map((msg) => (
             <div
-              key={i}
+              key={msg.id}
               className={`ai-message ai-message--${msg.role}${msg.isError ? ' ai-message--error' : ''}`}
             >
               <div className="ai-message-avatar" aria-hidden="true">
@@ -583,6 +658,9 @@ export default function AIAssistant() {
                 <div className="ai-message-bubble">
                   <p>{msg.text}</p>
                 </div>
+
+                {/* Workflow summary cards */}
+                {msg.workflowSummary && <WorkflowSummaryCard data={msg.workflowSummary} />}
 
                 {/* Structured data results */}
                 {msg.data && renderResultData(msg.data)}
@@ -644,9 +722,9 @@ export default function AIAssistant() {
           <div className="ai-suggestions" aria-label="Suggested prompts">
             <div className="ai-suggestions-label">Try asking:</div>
             <div className="ai-suggestion-chips">
-              {suggestions.map((s, i) => (
+              {suggestions.map((s) => (
                 <button
-                  key={i}
+                  key={s}
                   className="ai-suggestion-chip"
                   onClick={() => sendQuery(s)}
                   disabled={loading || !assistantReady}

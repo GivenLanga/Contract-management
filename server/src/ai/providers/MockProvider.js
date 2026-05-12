@@ -33,7 +33,10 @@ class MockProvider extends AIModelProvider {
     if (text.includes('my task')) {
       return { type: 'tool_call', toolName: 'list_my_tasks', arguments: {} };
     }
-    if (text.includes('expir')) {
+    if (/\b(expired|already expired|have expired|has expired|past expiry|past expiration)\b/.test(text) && text.includes('contract')) {
+      return { type: 'tool_call', toolName: 'get_expired_contracts', arguments: { countOnly: text.includes('how many') || text.includes('count') } };
+    }
+    if (/\b(expiring|expire soon|expires soon|expire in|expires in|expire next|expires next|expiry soon|about to expire|renewal)\b/.test(text) && text.includes('contract')) {
       const m    = text.match(/(\d+)\s*(day|week|month)/);
       const mult = { day: 1, week: 7, month: 30 };
       const days = m ? parseInt(m[1]) * (mult[m[2]] || 1) : 30;

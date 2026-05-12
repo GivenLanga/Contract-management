@@ -9,14 +9,33 @@ import {
   fieldPercentStyle,
   fieldTypeConfig,
 } from '../../services/signingFields';
+import { collectSigningClientEvidence } from '../../services/signingEvidenceClient';
+import { normalizeSignatureCanvas, normalizeSignatureDataUrl } from './signatureImageUtils';
 import './ExternalSigningPage.css';
 
 const BASE_URL = import.meta.env.VITE_API_URL || '/api';
 const MAX_SIGNATURE_IMAGE_BYTES = 2 * 1024 * 1024;
-const DRAWN_SIGNATURE_MIN_POINTS = 3;
+const DRAWN_SIGNATURE_MIN_POINTS = 8;
 const ACCEPTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg']);
+const MEDIA_EVIDENCE_MODES = new Set(['photo', 'video', 'ron']);
 
 const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
+const blobToDataUrl = (blob) => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result);
+  reader.onerror = () => reject(reader.error || new Error('Could not read media evidence.'));
+  reader.readAsDataURL(blob);
+});
+const baseMimeType = (value, fallback = '') =>
+  String(value || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase() || fallback;
+const supportedVideoMimeType = () => {
+  if (!window.MediaRecorder) return '';
+  return ['video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4']
+    .find((type) => window.MediaRecorder.isTypeSupported(type)) || '';
+};
 
 const tokenSegment = (token) => encodeURIComponent(token || '');
 
@@ -31,12 +50,16 @@ const parseResponseBody = async (res) => {
 };
 
 const publicJsonFetch = async (path, options = {}) => {
+  const { signingSessionToken, idempotencyKey, devSkipVerification, ...fetchOptions } = options;
   const headers = {
     Accept: 'application/json',
     ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+    ...(signingSessionToken ? { 'X-Signing-Session': signingSessionToken } : {}),
+    ...(idempotencyKey ? { 'X-Signing-Idempotency-Key': idempotencyKey } : {}),
+    ...(devSkipVerification ? { 'X-Signing-Dev-Bypass': 'true' } : {}),
     ...options.headers,
   };
-  const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+  const res = await fetch(`${BASE_URL}${path}`, { ...fetchOptions, headers });
   const body = await parseResponseBody(res);
 
   if (!res.ok) {
@@ -50,8 +73,11 @@ const publicJsonFetch = async (path, options = {}) => {
 };
 
 const fieldValueIsComplete = (field, value) => {
-  if (field?.type === 'checkbox' || field?.type === 'radio') {
+  if (field?.type === 'checkbox') {
     return value === true || value === 'true';
+  }
+  if (field?.type === 'radio') {
+    if (value === false || value === 'false') return false;
   }
   return String(value ?? '').trim().length > 0;
 };
@@ -60,6 +86,35 @@ const requirePlacedFields = (fields = []) =>
   (fields || []).map((field) => ({ ...field, required: true }));
 
 const normalizedEmail = (value) => String(value || '').trim().toLowerCase();
+const cssEscape = (value) => {
+  if (typeof window !== 'undefined' && window.CSS?.escape) return window.CSS.escape(String(value));
+  return String(value).replace(/["\\]/g, '\\$&');
+};
+
+const sessionStorageKeyFor = (token) => `contractiq.externalSigning.${token || ''}.session`;
+const readSigningSession = (token) => {
+  if (typeof window === 'undefined' || !token) return '';
+  try {
+    return window.sessionStorage.getItem(sessionStorageKeyFor(token)) || '';
+  } catch {
+    return '';
+  }
+};
+const writeSigningSession = (token, sessionToken) => {
+  if (typeof window === 'undefined' || !token) return;
+  try {
+    const key = sessionStorageKeyFor(token);
+    if (sessionToken) window.sessionStorage.setItem(key, sessionToken);
+    else window.sessionStorage.removeItem(key);
+  } catch {
+    // Browser storage can be disabled; the in-memory session still works for this tab.
+  }
+};
+
+const idempotencyKey = () => {
+  if (typeof window !== 'undefined' && window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
 
 const initialsFor = (signer) => {
   const source = signer?.name || signer?.email || 'Signer';
@@ -72,17 +127,6 @@ const initialsFor = (signer) => {
     .join('')
     .toUpperCase()
     .slice(0, 3);
-};
-
-const removeWhiteBackground = (imageData) => {
-  const data = imageData.data;
-  for (let i = 0; i < data.length; i += 4) {
-    const red = data[i];
-    const green = data[i + 1];
-    const blue = data[i + 2];
-    if (red > 235 && green > 235 && blue > 235) data[i + 3] = 0;
-  }
-  return imageData;
 };
 
 const signatureMethodForTab = (tab) => {
@@ -230,16 +274,8 @@ function ExternalSignatureModal({ documentName, signer, signingField, captureMod
     }
   };
 
-  const canvasToTransparentPng = (canvas) => {
-    const ctx = canvas.getContext('2d');
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const cleaned = removeWhiteBackground(imageData);
-    const offscreen = window.document.createElement('canvas');
-    offscreen.width = canvas.width;
-    offscreen.height = canvas.height;
-    offscreen.getContext('2d').putImageData(cleaned, 0, 0);
-    return offscreen.toDataURL('image/png');
-  };
+  const canvasToSignaturePng = (canvas, kind = 'signature') =>
+    normalizeSignatureCanvas(canvas, { kind });
 
   const drawTypedSignature = () => {
     const name = typedName.trim();
@@ -260,7 +296,7 @@ function ExternalSignatureModal({ documentName, signer, signingField, captureMod
 
     ctx.textBaseline = 'middle';
     ctx.fillText(name, 24, canvas.height / 2 + 4);
-    return canvas.toDataURL('image/png');
+    return normalizeSignatureCanvas(canvas, { kind: 'signature' }) || canvas.toDataURL('image/png');
   };
 
   const signaturePointCount = () =>
@@ -273,7 +309,7 @@ function ExternalSignatureModal({ documentName, signer, signingField, captureMod
     if (tab === 'draw') {
       const canvas = canvasRef.current;
       if (!canvas || !hasDrawnSignature || signaturePointCount() < DRAWN_SIGNATURE_MIN_POINTS) return null;
-      return canvasToTransparentPng(canvas);
+      return canvasToSignaturePng(canvas, 'signature');
     }
     if (tab === 'upload') return uploadedSignature || null;
     return drawTypedSignature();
@@ -281,7 +317,7 @@ function ExternalSignatureModal({ documentName, signer, signingField, captureMod
 
   const getInitialsData = () => {
     const canvas = initialsCanvasRef.current;
-    if (canvas && hasDrawnInitials) return canvasToTransparentPng(canvas);
+    if (canvas && hasDrawnInitials) return canvasToSignaturePng(canvas, 'initials');
     if (uploadedInitials) return uploadedInitials;
 
     const initials = typedInitials.trim().toUpperCase().slice(0, 4);
@@ -296,10 +332,11 @@ function ExternalSignatureModal({ documentName, signer, signingField, captureMod
     ctx.fillStyle = '#111827';
     ctx.textBaseline = 'middle';
     ctx.fillText(initials, 14, canvasElement.height / 2 + 2);
-    return canvasElement.toDataURL('image/png');
+    return normalizeSignatureCanvas(canvasElement, { kind: 'initials' }) || canvasElement.toDataURL('image/png');
   };
 
-  const handleFileUpload = (setter) => (event) => {
+  const handleFileUpload = (setter, kind = 'signature') => (event) => {
+    const input = event.target;
     const file = event.target.files?.[0];
     if (!file) return;
 
@@ -316,11 +353,21 @@ function ExternalSignatureModal({ documentName, signer, signingField, captureMod
     }
 
     const reader = new FileReader();
-    reader.onload = (loadEvent) => {
-      setError('');
-      setter(String(loadEvent.target?.result || ''));
+    reader.onload = async (loadEvent) => {
+      try {
+        const dataUrl = String(loadEvent.target?.result || '');
+        setter(await normalizeSignatureDataUrl(dataUrl, { kind }));
+        setError('');
+      } catch (readError) {
+        setError(readError.message || 'Could not prepare that image file.');
+      } finally {
+        input.value = '';
+      }
     };
-    reader.onerror = () => setError('Could not read that image file.');
+    reader.onerror = () => {
+      setError('Could not read that image file.');
+      input.value = '';
+    };
     reader.readAsDataURL(file);
   };
 
@@ -448,7 +495,7 @@ function ExternalSignatureModal({ documentName, signer, signingField, captureMod
                 ) : (
                   <span>Choose a signature image</span>
                 )}
-                <input type="file" accept="image/png,image/jpeg" onChange={handleFileUpload(setUploadedSignature)} />
+                <input type="file" accept="image/png,image/jpeg" onChange={handleFileUpload(setUploadedSignature, 'signature')} />
               </label>
             )}
 
@@ -491,7 +538,7 @@ function ExternalSignatureModal({ documentName, signer, signingField, captureMod
                 </button>
                 <label className="ext-upload-small">
                   Upload
-                  <input type="file" accept="image/png,image/jpeg" onChange={handleFileUpload(setUploadedInitials)} />
+                  <input type="file" accept="image/png,image/jpeg" onChange={handleFileUpload(setUploadedInitials, 'initials')} />
                 </label>
               </div>
             </div>
@@ -578,6 +625,10 @@ function DeclineModal({ documentName, loading, error, reason, onReasonChange, on
 export default function ExternalSigningPage() {
   const { token } = useParams();
   const pdfScrollRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const mediaChunksRef = useRef([]);
+  const mediaEvidenceRef = useRef(null);
 
   const [info, setInfo] = useState(null);
   const [pdfBlob, setPdfBlob] = useState(null);
@@ -589,6 +640,9 @@ export default function ExternalSigningPage() {
   const [previewError, setPreviewError] = useState('');
   const [actionError, setActionError] = useState('');
   const [signed, setSigned] = useState(false);
+  const [completion, setCompletion] = useState(null);
+  const [downloadError, setDownloadError] = useState('');
+  const [downloadingFinal, setDownloadingFinal] = useState(false);
   const [declined, setDeclined] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [showDeclineModal, setShowDeclineModal] = useState(false);
@@ -596,12 +650,37 @@ export default function ExternalSigningPage() {
   const [signatureDraft, setSignatureDraft] = useState(null);
   const [signatureFocus, setSignatureFocus] = useState('signature');
   const [captureMode, setCaptureMode] = useState('signature');
+  const [consentAccepted, setConsentAccepted] = useState(false);
+  const [includeLocationEvidence, setIncludeLocationEvidence] = useState(false);
+  const [mediaCaptureError, setMediaCaptureError] = useState('');
+  const [ronTechCheck, setRonTechCheck] = useState({ status: 'idle', checkedAt: '', error: '' });
+  const [ronAcknowledged, setRonAcknowledged] = useState(false);
+  const [ronIdentityFile, setRonIdentityFile] = useState(null);
+  const [ronIdentityUploading, setRonIdentityUploading] = useState(false);
+  const [ronIdentityError, setRonIdentityError] = useState('');
   const [submittingSignature, setSubmittingSignature] = useState(false);
   const [declineReason, setDeclineReason] = useState('');
   const [declineError, setDeclineError] = useState('');
   const [declineLoading, setDeclineLoading] = useState(false);
+  const [authSessionToken, setAuthSessionToken] = useState(() => readSigningSession(token));
+  const [authCode, setAuthCode] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authNotice, setAuthNotice] = useState('');
+  const [authSending, setAuthSending] = useState(false);
+  const [authVerifying, setAuthVerifying] = useState(false);
 
   const encodedToken = useMemo(() => tokenSegment(token), [token]);
+  const devSkipVerification = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('devSkipVerification') === '1';
+  }, []);
+
+  useEffect(() => {
+    setAuthSessionToken(readSigningSession(token));
+    setAuthCode('');
+    setAuthError('');
+    setAuthNotice('');
+  }, [token]);
 
   useEffect(() => {
     if (!token) {
@@ -618,9 +697,16 @@ export default function ExternalSigningPage() {
       setPreviewError('');
       setActionError('');
       setSigned(false);
+      setCompletion(null);
+      setDownloadError('');
       setDeclined(false);
       setSignatureDraft(null);
+      setConsentAccepted(false);
       setSubmittingSignature(false);
+      setRonTechCheck({ status: 'idle', checkedAt: '', error: '' });
+      setRonAcknowledged(false);
+      setRonIdentityFile(null);
+      setRonIdentityError('');
       setInfo(null);
       setPdfBlob(null);
       setFirstPageMetric(null);
@@ -628,16 +714,29 @@ export default function ExternalSigningPage() {
       try {
         const infoData = await publicJsonFetch(`/signing/public/sign/${encodedToken}`, {
           signal: controller.signal,
+          signingSessionToken: authSessionToken,
+          devSkipVerification,
         });
         const nextInfo = { ...infoData, fields: requirePlacedFields(infoData.fields) };
         setInfo(nextInfo);
+        if (nextInfo.receipt) {
+          setCompletion(nextInfo.receipt);
+          setSigned(true);
+        }
+
+        if (nextInfo.auth?.required && !nextInfo.auth?.verified) return;
 
         if (!nextInfo.isTurn) return;
+        if (nextInfo.signer?.signingStatus === 'signed') return;
 
         try {
           const docRes = await fetch(`${BASE_URL}/signing/public/document/${encodedToken}`, {
             signal: controller.signal,
-            headers: { Accept: 'application/pdf,*/*' },
+            headers: {
+              Accept: 'application/pdf,*/*',
+              ...(authSessionToken ? { 'X-Signing-Session': authSessionToken } : {}),
+              ...(devSkipVerification ? { 'X-Signing-Dev-Bypass': 'true' } : {}),
+            },
           });
 
           if (!docRes.ok) {
@@ -659,6 +758,14 @@ export default function ExternalSigningPage() {
           setSigned(true);
           return;
         }
+        if (loadError.status === 401) {
+          writeSigningSession(token, '');
+          setAuthSessionToken('');
+        }
+        if (loadError.status === 409 && /declined/i.test(loadError.message)) {
+          setDeclined(true);
+          return;
+        }
         setError(loadError.message || 'Failed to load the signing request.');
       } finally {
         if (!controller.signal.aborted) setLoading(false);
@@ -667,7 +774,7 @@ export default function ExternalSigningPage() {
 
     load();
     return () => controller.abort();
-  }, [encodedToken, token]);
+  }, [authSessionToken, devSkipVerification, encodedToken, token]);
 
   const signerIdentity = useMemo(() => ({
     name: info?.signer?.name || info?.signer?.email || '',
@@ -746,15 +853,23 @@ export default function ExternalSigningPage() {
     setActionError('');
     setFieldValues((current) => ({ ...current, [fieldId]: value }));
   };
+  const effectiveFieldValue = useCallback(
+    (field) => fieldValues[field.id] ?? defaultFieldValue(field, signerIdentity),
+    [fieldValues, signerIdentity],
+  );
 
   const requiredValueFields = useMemo(
     () => fields.filter((field) => VALUE_FIELD_TYPES.has(field.type) && field.required && !field.filled),
     [fields],
   );
+  const hasRequiredValueFields = requiredValueFields.length > 0;
 
-  const missingRequiredField = useMemo(
-    () => requiredValueFields.find((field) => !fieldValueIsComplete(field, fieldValues[field.id])),
-    [fieldValues, requiredValueFields],
+  const missingRequiredValueField = useMemo(
+    () => {
+      if (!hasRequiredValueFields) return null;
+      return requiredValueFields.find((field) => !fieldValueIsComplete(field, effectiveFieldValue(field))) || null;
+    },
+    [effectiveFieldValue, hasRequiredValueFields, requiredValueFields],
   );
 
   const pendingSignatureField = useMemo(() => (
@@ -770,34 +885,260 @@ export default function ExternalSigningPage() {
     () => fields.find((field) => field.type === 'initials' && !field.filled && fieldBelongsToSigner(field)) || null,
     [fieldBelongsToSigner, fields],
   );
+  const evidenceMode = info?.document?.signingEvidence?.mode || 'standard';
+  const ronPolicy = info?.document?.signingEvidence?.ron || null;
+  const ronIdentity = ronPolicy?.identity?.signer || null;
+  const ronSession = ronPolicy?.session || null;
+  const requiresMediaEvidence = MEDIA_EVIDENCE_MODES.has(evidenceMode);
+  const requiresVideoEvidence = evidenceMode === 'video' || evidenceMode === 'ron';
+  const requiresRonReadiness = evidenceMode === 'ron';
+
+  // Scheduled session: waiting room check
+  const scheduledSessionAt = ronPolicy?.scheduledAt || ronSession?.scheduledAt || info?.document?.signingEvidence?.scheduledAt || null;
+  const sessionIsScheduledAndPending = requiresRonReadiness && scheduledSessionAt
+    && !ronSession?.notaryStartedAt
+    && new Date(scheduledSessionAt).getTime() > Date.now();
 
   const signingBlockedReason = useMemo(() => {
     if (!pdfBlob) return previewError || 'Document preview must load before signing.';
     if (!pendingSignatureField) return 'No signature field is assigned to this signing link.';
-    if (missingRequiredField) {
-      const label = fieldTypeConfig(missingRequiredField.type).label.toLowerCase();
+    if (missingRequiredValueField) {
+      const label = fieldTypeConfig(missingRequiredValueField.type).label.toLowerCase();
       return `Complete the required ${label} field before signing.`;
     }
+    if (requiresRonReadiness && sessionIsScheduledAndPending) {
+      return `The notarization session is scheduled. Please join at the scheduled time.`;
+    }
+    if (requiresRonReadiness && ronIdentity?.status !== 'verified') {
+      return ronPolicy?.identityMethod === 'personal_knowledge'
+        ? 'The Notary Public must verify personal knowledge before signing.'
+        : 'Upload your identity document for the Notary Public to verify before signing.';
+    }
+    if (requiresRonReadiness && !ronSession?.notaryStartedAt) return 'Wait for the Notary Public to start the live session before signing.';
+    if (requiresRonReadiness && ronTechCheck.status !== 'passed') return 'Complete the camera and microphone check before signing.';
+    if (requiresRonReadiness && !ronAcknowledged) return 'Confirm the notarization requirements before signing.';
     return '';
-  }, [missingRequiredField, pdfBlob, pendingSignatureField, previewError]);
+  }, [missingRequiredValueField, pdfBlob, pendingSignatureField, previewError, requiresRonReadiness, ronAcknowledged, ronIdentity?.status, ronPolicy?.identityMethod, ronSession?.notaryStartedAt, ronTechCheck.status, sessionIsScheduledAndPending]);
 
   const draftHasSignature = Boolean(signatureDraft?.signatureData);
   const draftHasInitials = !hasPendingInitialsField || Boolean(signatureDraft?.initialsData);
   const draftReadyToSend = draftHasSignature && draftHasInitials;
   const canStartSigning = Boolean(info?.isTurn && !draftReadyToSend && !signingBlockedReason);
-  const canSubmitDraft = Boolean(info?.isTurn && draftReadyToSend && !missingRequiredField && !submittingSignature);
-  const completedFields = fields.filter((field) => {
+  const canSubmitDraft = Boolean(info?.isTurn && draftReadyToSend && consentAccepted && !missingRequiredValueField && !submittingSignature);
+
+  const capturePhotoFromStream = useCallback(async (stream) => {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+    await video.play();
+    await new Promise((resolve) => {
+      if (video.readyState >= 2) resolve();
+      else video.onloadedmetadata = resolve;
+    });
+    const width = Math.min(640, video.videoWidth || 640);
+    const height = Math.round(width * ((video.videoHeight || 480) / (video.videoWidth || 640)));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d').drawImage(video, 0, 0, width, height);
+    video.pause();
+    video.srcObject = null;
+    return canvas.toDataURL('image/jpeg', 0.78);
+  }, []);
+
+  const stopMediaTracks = useCallback(() => {
+    mediaStreamRef.current?.getTracks?.().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+  }, []);
+
+  const runRonTechCheck = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setRonTechCheck({
+        status: 'failed',
+        checkedAt: '',
+        error: 'This browser does not support the camera and microphone check required for RON.',
+      });
+      return;
+    }
+
+    setRonTechCheck({ status: 'checking', checkedAt: '', error: '' });
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: true,
+      });
+      const hasVideo = stream.getVideoTracks().some((track) => track.readyState === 'live');
+      const hasAudio = stream.getAudioTracks().some((track) => track.readyState === 'live');
+      stream.getTracks().forEach((track) => track.stop());
+      if (!hasVideo || !hasAudio) throw new Error('Camera and microphone access are both required for RON.');
+      setRonTechCheck({ status: 'passed', checkedAt: new Date().toISOString(), error: '' });
+      setMediaCaptureError('');
+    } catch (checkError) {
+      setRonTechCheck({
+        status: 'failed',
+        checkedAt: '',
+        error: checkError.message || 'Camera and microphone access are required for RON.',
+      });
+    }
+  }, []);
+
+  const cancelActiveMediaCapture = useCallback(() => {
+    if (mediaRecorderRef.current?.state === 'recording') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // Recorder may already be stopping; cleanup continues below.
+      }
+    }
+    mediaRecorderRef.current = null;
+    mediaChunksRef.current = [];
+    mediaEvidenceRef.current = null;
+    stopMediaTracks();
+  }, [stopMediaTracks]);
+
+  const startMediaEvidenceCapture = useCallback(async ({ restart = false } = {}) => {
+    if (!requiresMediaEvidence) return true;
+    if (restart) cancelActiveMediaCapture();
+    if (mediaEvidenceRef.current?.captureStartedAt) return true;
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMediaCaptureError('Camera capture is required for this audit trail option, but this browser does not support it.');
+      return false;
+    }
+
+    try {
+      setMediaCaptureError('');
+      const constraints = {
+        video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: evidenceMode === 'ron',
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      mediaStreamRef.current = stream;
+      const captureStartedAt = new Date().toISOString();
+      const photoData = await capturePhotoFromStream(stream);
+      mediaEvidenceRef.current = {
+        mode: evidenceMode,
+        captureStartedAt,
+        photoCapturedAt: new Date().toISOString(),
+        photoData,
+        userMediaConstraints: constraints,
+      };
+
+      if (requiresVideoEvidence) {
+        const mimeType = supportedVideoMimeType();
+        if (!window.MediaRecorder || !mimeType) throw new Error('This browser cannot record video evidence.');
+        mediaChunksRef.current = [];
+        const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 450000, audioBitsPerSecond: 64000 });
+        mediaRecorderRef.current = recorder;
+        recorder.ondataavailable = (event) => {
+          if (event.data?.size) mediaChunksRef.current.push(event.data);
+        };
+        recorder.start(1000);
+        mediaEvidenceRef.current.videoStartedAt = new Date().toISOString();
+        mediaEvidenceRef.current.videoMimeType = baseMimeType(mimeType, 'video/webm');
+        mediaEvidenceRef.current.videoRecorderMimeType = mimeType;
+      } else {
+        stopMediaTracks();
+      }
+      return true;
+    } catch (captureError) {
+      stopMediaTracks();
+      mediaRecorderRef.current = null;
+      mediaEvidenceRef.current = null;
+      setMediaCaptureError(captureError.message || 'Camera capture is required for this audit trail option.');
+      return false;
+    }
+  }, [cancelActiveMediaCapture, capturePhotoFromStream, evidenceMode, requiresMediaEvidence, requiresVideoEvidence, stopMediaTracks]);
+
+  const stopMediaEvidenceCapture = useCallback(async () => {
+    const current = mediaEvidenceRef.current;
+    if (!current) return null;
+    if (mediaRecorderRef.current?.state === 'recording') {
+      await new Promise((resolve) => {
+        mediaRecorderRef.current.onstop = resolve;
+        try {
+          mediaRecorderRef.current.requestData();
+        } catch {
+          // Some browsers only flush data on stop.
+        }
+        mediaRecorderRef.current.stop();
+      });
+      mediaRecorderRef.current = null;
+    }
+    if (requiresVideoEvidence && !current.videoData && mediaChunksRef.current.length) {
+      const videoMimeType = baseMimeType(current.videoMimeType || current.videoRecorderMimeType, 'video/webm');
+      const videoBlob = new Blob(mediaChunksRef.current, { type: videoMimeType });
+      if (videoBlob.size) {
+        current.videoData = await blobToDataUrl(videoBlob);
+        current.videoMimeType = videoMimeType;
+        current.videoStoppedAt = new Date().toISOString();
+      }
+    }
+    mediaChunksRef.current = [];
+    current.captureStoppedAt = new Date().toISOString();
+    stopMediaTracks();
+    return current;
+  }, [requiresVideoEvidence, stopMediaTracks]);
+
+  useEffect(() => () => {
+    cancelActiveMediaCapture();
+  }, [cancelActiveMediaCapture]);
+
+  const fieldIsComplete = useCallback((field) => {
     if (field.filled) return true;
     if (SIGNATURE_FIELD_TYPES.has(field.type) && draftAppliesToField(field) && signatureImageForField(field)) return true;
     if (VALUE_FIELD_TYPES.has(field.type)) {
-      return fieldValueIsComplete(field, fieldValues[field.id] ?? defaultFieldValue(field, signerIdentity));
+      return fieldValueIsComplete(field, effectiveFieldValue(field));
     }
     return false;
-  }).length;
-  const fieldProgress = fields.length ? Math.round((completedFields / fields.length) * 100) : 0;
+  }, [draftAppliesToField, effectiveFieldValue, signatureImageForField]);
+  const requiredFieldItems = useMemo(() => {
+    const items = [];
+    const initialsFields = [];
+
+    for (const field of fields) {
+      if (!field.required) continue;
+
+      if (field.type === 'initials') {
+        initialsFields.push(field);
+        continue;
+      }
+
+      items.push({ id: field.id, type: field.type, fields: [field] });
+    }
+
+    if (initialsFields.length) {
+      items.push({ id: 'initials-group', type: 'initials', fields: initialsFields });
+    }
+
+    return items;
+  }, [fields]);
+  const fieldItemIsComplete = useCallback(
+    (item) => item.fields.every((field) => fieldIsComplete(field)),
+    [fieldIsComplete],
+  );
+  const completedFieldItems = requiredFieldItems.filter(fieldItemIsComplete).length;
+  const fieldItemCount = requiredFieldItems.length;
+  const fieldProgress = fieldItemCount ? Math.round((completedFieldItems / fieldItemCount) * 100) : 0;
+  const nextRequiredItem = useMemo(
+    () => requiredFieldItems.find((item) => !fieldItemIsComplete(item)) || null,
+    [fieldItemIsComplete, requiredFieldItems],
+  );
+  const nextRequiredField = useMemo(
+    () => nextRequiredItem?.fields.find((field) => !fieldIsComplete(field)) || null,
+    [fieldIsComplete, nextRequiredItem],
+  );
+  const signerTokenExpiresAt = info?.signer?.tokenExpiresAt || '';
+  const linkExpiryLabel = useMemo(() => {
+    if (!signerTokenExpiresAt) return '';
+    const parsed = new Date(signerTokenExpiresAt);
+    if (Number.isNaN(parsed.getTime())) return '';
+    return parsed.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  }, [signerTokenExpiresAt]);
 
   const fieldValueForDisplay = (field, value) => {
-    if (field.type === 'checkbox' || field.type === 'radio') return value === true || value === 'true' ? '✓' : '';
+    if (field.type === 'checkbox') return value === true || value === 'true' ? '✓' : '';
+    if (field.type === 'radio') return (value === false || value === 'false') ? '' : String(value ?? '').trim();
     return String(value ?? '').trim();
   };
 
@@ -805,7 +1146,7 @@ export default function ExternalSigningPage() {
     const values = {};
     fields.forEach((field) => {
       if (!VALUE_FIELD_TYPES.has(field.type) || field.filled) return;
-      const value = fieldValues[field.id] ?? defaultFieldValue(field, signerIdentity);
+      const value = effectiveFieldValue(field);
       if (field.required || fieldValueIsComplete(field, value)) {
         values[field.id] = value;
       }
@@ -813,7 +1154,146 @@ export default function ExternalSigningPage() {
     return values;
   };
 
-  const openSignatureModal = (field) => {
+  const sendAuthCode = async () => {
+    setAuthError('');
+    setAuthNotice('');
+    setAuthSending(true);
+    try {
+      const result = await publicJsonFetch(`/signing/public/sign/${encodedToken}/auth/send`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+      setInfo((current) => current ? { ...current, auth: result.auth || current.auth } : current);
+      setAuthNotice(result.message || 'Verification code sent.');
+    } catch (authSendError) {
+      setAuthError(authSendError.message || 'Could not send a verification code.');
+    } finally {
+      setAuthSending(false);
+    }
+  };
+
+  const verifyAuthCode = async (event) => {
+    event?.preventDefault?.();
+    const code = authCode.replace(/\D/g, '').slice(0, 6);
+    if (code.length !== 6) {
+      setAuthError('Enter the 6 digit verification code.');
+      return;
+    }
+    setAuthError('');
+    setAuthNotice('');
+    setAuthVerifying(true);
+    try {
+      const result = await publicJsonFetch(`/signing/public/sign/${encodedToken}/auth/verify`, {
+        method: 'POST',
+        body: JSON.stringify({ code }),
+      });
+      writeSigningSession(token, result.sessionToken);
+      setAuthSessionToken(result.sessionToken || '');
+      setInfo((current) => current ? { ...current, auth: result.auth || current.auth } : current);
+      setAuthCode('');
+    } catch (authVerifyError) {
+      setAuthError(authVerifyError.message || 'Could not verify that code.');
+    } finally {
+      setAuthVerifying(false);
+    }
+  };
+
+  const uploadRonIdentityDocument = async () => {
+    if (!ronIdentityFile) {
+      setRonIdentityError('Choose a government ID image or PDF first.');
+      return;
+    }
+    setRonIdentityUploading(true);
+    setRonIdentityError('');
+    try {
+      const formData = new FormData();
+      formData.append('idDocument', ronIdentityFile);
+      const res = await fetch(`${BASE_URL}/signing/public/sign/${encodedToken}/ron/identity`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          ...(authSessionToken ? { 'X-Signing-Session': authSessionToken } : {}),
+          ...(devSkipVerification ? { 'X-Signing-Dev-Bypass': 'true' } : {}),
+        },
+        body: formData,
+      });
+      const body = await parseResponseBody(res);
+      if (!res.ok) {
+        const err = new Error(body.error || `Identity proofing failed (${res.status}).`);
+        err.status = res.status;
+        throw err;
+      }
+      if (body.signingEvidence) {
+        setInfo((current) => current ? {
+          ...current,
+          document: {
+            ...current.document,
+            signingEvidence: body.signingEvidence,
+          },
+        } : current);
+      }
+      setRonIdentityFile(null);
+    } catch (identityError) {
+      setRonIdentityError(identityError.message || 'Could not complete RON identity proofing.');
+    } finally {
+      setRonIdentityUploading(false);
+    }
+  };
+
+  const downloadFinalPdf = async () => {
+    if (!completion?.downloadUrl) return;
+    setDownloadError('');
+    setDownloadingFinal(true);
+    try {
+      const res = await fetch(`${BASE_URL}${completion.downloadUrl}`, {
+        headers: {
+          Accept: 'application/pdf',
+          ...(authSessionToken ? { 'X-Signing-Session': authSessionToken } : {}),
+          ...(devSkipVerification ? { 'X-Signing-Dev-Bypass': 'true' } : {}),
+        },
+      });
+      if (!res.ok) {
+        const message = await res.text().catch(() => '');
+        throw new Error(message || `Download failed (${res.status}).`);
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = window.document.createElement('a');
+      link.href = url;
+      link.download = `${completion.document?.name || 'signed-document'}.pdf`;
+      window.document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (downloadFailure) {
+      setDownloadError(downloadFailure.message || 'Could not download the finalized PDF.');
+    } finally {
+      setDownloadingFinal(false);
+    }
+  };
+
+  const scrollToField = (field) => {
+    if (!field?.id) return;
+    const target = pdfScrollRef.current?.querySelector(`[data-ext-field-id="${cssEscape(field.id)}"]`);
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    window.setTimeout(() => {
+      const focusTarget = target.matches('button, input, select, textarea')
+        ? target
+        : target.querySelector('button, input, select, textarea');
+      focusTarget?.focus?.({ preventScroll: true });
+    }, 240);
+  };
+
+  const goToRequiredField = (field) => {
+    if (!field) return;
+    scrollToField(field);
+    if (SIGNATURE_FIELD_TYPES.has(field.type)) {
+      window.setTimeout(() => { void openSignatureModal(field); }, 280);
+    }
+  };
+
+  const openSignatureModal = async (field) => {
     if (!signatureDraft && !canStartSigning) {
       setActionError(signingBlockedReason);
       return;
@@ -822,6 +1302,10 @@ export default function ExternalSigningPage() {
     const focus = field?.type === 'initials' ? 'initials' : 'signature';
     const mode = focus === 'initials' ? 'initials' : 'signature';
     const targetField = field?.type === 'signature' ? field : pendingSignatureField;
+    if (focus === 'signature') {
+      const mediaReady = await startMediaEvidenceCapture({ restart: Boolean(signatureDraft?.signatureData) });
+      if (!mediaReady) return;
+    }
     setActionError('');
     setSignatureFocus(focus);
     setCaptureMode(mode);
@@ -834,6 +1318,31 @@ export default function ExternalSigningPage() {
       throw new Error(signingBlockedReason || 'This signing request is not ready.');
     }
 
+    const capturedMediaEvidence = payload.signatureData && requiresMediaEvidence
+      ? await stopMediaEvidenceCapture()
+      : null;
+    if (payload.signatureData && requiresMediaEvidence && !capturedMediaEvidence?.photoData) {
+      throw new Error('Photo evidence could not be captured. Allow camera access and try again.');
+    }
+    if (payload.signatureData && requiresVideoEvidence && !capturedMediaEvidence?.videoData) {
+      throw new Error('Video evidence could not be captured. Allow camera access and try again.');
+    }
+    if (payload.signatureData && evidenceMode === 'ron' && capturedMediaEvidence) {
+      capturedMediaEvidence.ronSession = {
+        notary: ronPolicy?.notary || null,
+        identityMethod: ronPolicy?.identityMethod || 'credential_analysis_kba',
+        identityStatus: ronIdentity?.status || 'not_started',
+        meetingUrl: ronSession?.meetingUrl || '',
+        roomId: ronSession?.roomId || '',
+        sessionStatus: ronSession?.status || '',
+        notaryStartedAt: ronSession?.notaryStartedAt || null,
+        signerAcknowledgedAt: ronAcknowledged ? new Date().toISOString() : null,
+        techCheckedAt: ronTechCheck.checkedAt || null,
+        sessionStartedAt: capturedMediaEvidence.captureStartedAt || null,
+        sessionStoppedAt: capturedMediaEvidence.captureStoppedAt || null,
+      };
+    }
+
     setSignatureDraft((current) => ({
       ...(current || {}),
       ...payload,
@@ -842,6 +1351,7 @@ export default function ExternalSigningPage() {
       position: payload.position || current?.position,
       method: payload.method || current?.method,
       signatureTelemetry: payload.signatureTelemetry || current?.signatureTelemetry,
+      mediaEvidence: capturedMediaEvidence || current?.mediaEvidence,
     }));
     setShowModal(false);
     setActionError('');
@@ -856,17 +1366,39 @@ export default function ExternalSigningPage() {
       setActionError('Add your initials before sending.');
       return;
     }
-    if (missingRequiredField) {
-      const label = fieldTypeConfig(missingRequiredField.type).label.toLowerCase();
+    if (missingRequiredValueField) {
+      const label = fieldTypeConfig(missingRequiredValueField.type).label.toLowerCase();
       setActionError(`Complete the required ${label} field before sending.`);
+      return;
+    }
+    if (!consentAccepted) {
+      setActionError('Accept electronic signature consent before sending.');
       return;
     }
 
     setSubmittingSignature(true);
     setActionError('');
     try {
-      await publicJsonFetch(`/signing/public/sign/${encodedToken}`, {
+      const mediaEvidence = signatureDraft.mediaEvidence || await stopMediaEvidenceCapture();
+      if (requiresMediaEvidence && !mediaEvidence?.photoData) {
+        setActionError('Photo evidence is required for this signing request. Edit the signature and allow camera access.');
+        setSubmittingSignature(false);
+        return;
+      }
+      if (requiresVideoEvidence && !mediaEvidence?.videoData) {
+        setActionError('Video evidence is required for this signing request. Edit the signature and allow camera access.');
+        setSubmittingSignature(false);
+        return;
+      }
+      const clientEvidence = await collectSigningClientEvidence({
+        scope: token,
+        includeLocation: includeLocationEvidence,
+      });
+      const result = await publicJsonFetch(`/signing/public/sign/${encodedToken}`, {
         method: 'POST',
+        signingSessionToken: authSessionToken,
+        idempotencyKey: idempotencyKey(),
+        devSkipVerification,
         body: JSON.stringify({
           signatureData: signatureDraft.signatureData,
           initialsData: signatureDraft.initialsData,
@@ -876,12 +1408,24 @@ export default function ExternalSigningPage() {
           page: signatureDraft.page,
           position: signatureDraft.position,
           fieldValues: fieldValuesForSubmission(),
+          consentAccepted,
+          consentVersion: info?.consent?.version,
+          clientEvidence,
+          mediaEvidence,
         }),
       });
 
       setSignatureDraft(null);
+      setConsentAccepted(false);
+      setIncludeLocationEvidence(false);
+      mediaEvidenceRef.current = null;
+      setCompletion(result.receipt || null);
       setSigned(true);
     } catch (submitError) {
+      if (submitError.status === 401) {
+        writeSigningSession(token, '');
+        setAuthSessionToken('');
+      }
       setActionError(submitError.message || 'Unable to send the signed document.');
     } finally {
       setSubmittingSignature(false);
@@ -895,6 +1439,8 @@ export default function ExternalSigningPage() {
     try {
       await publicJsonFetch(`/signing/reject-token/${encodedToken}`, {
         method: 'POST',
+        signingSessionToken: authSessionToken,
+        devSkipVerification,
         body: JSON.stringify({ reason: declineReason.trim() || 'No reason provided.' }),
       });
       setShowDeclineModal(false);
@@ -907,7 +1453,7 @@ export default function ExternalSigningPage() {
   };
 
   const renderValueField = (field, cfg, metric, editable) => {
-    const value = fieldValues[field.id] ?? defaultFieldValue(field, signerIdentity);
+    const value = effectiveFieldValue(field);
     const className = [
       'ext-field',
       `ext-field--${field.type}`,
@@ -918,12 +1464,13 @@ export default function ExternalSigningPage() {
       key: field.id,
       className,
       style: fieldPercentStyle(field, metric),
+      'data-ext-field-id': field.id,
       'aria-label': `${cfg.label}${field.required ? ' required' : ''}`,
     };
 
     if (!editable) {
       const displayValue = field.filled
-        ? fieldDisplayValue(field)
+        ? (field.type === 'radio' ? fieldValueForDisplay(field, field.fieldValue) : fieldDisplayValue(field))
         : fieldValueForDisplay(field, value);
       return (
         <div {...common}>
@@ -933,7 +1480,7 @@ export default function ExternalSigningPage() {
       );
     }
 
-    if (field.type === 'checkbox' || field.type === 'radio') {
+    if (field.type === 'checkbox') {
       return (
         <label {...common}>
           <input
@@ -942,6 +1489,30 @@ export default function ExternalSigningPage() {
             onChange={(event) => updateFieldValue(field.id, event.target.checked)}
           />
         </label>
+      );
+    }
+
+    if (field.type === 'radio') {
+      const options = Array.isArray(field.fieldMeta?.options) && field.fieldMeta.options.length
+        ? field.fieldMeta.options
+        : ['Yes', 'No'];
+      return (
+        <fieldset {...common}>
+          <div className="ext-radio-options">
+            {options.map((option) => (
+              <label key={option} className="ext-radio-option">
+                <input
+                  type="radio"
+                  name={`ext-radio-${field.id}`}
+                  value={option}
+                  checked={String(value ?? '') === String(option)}
+                  onChange={() => updateFieldValue(field.id, option)}
+                />
+                <span>{option}</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
       );
     }
 
@@ -1005,7 +1576,8 @@ export default function ExternalSigningPage() {
               type="button"
               className={className}
               style={fieldPercentStyle(field, metric)}
-              onClick={() => openSignatureModal(field)}
+              data-ext-field-id={field.id}
+              onClick={() => { void openSignatureModal(field); }}
               disabled={(!editable && !fieldImage) || !SIGNATURE_FIELD_TYPES.has(field.type)}
               title={field.filled ? `${cfg.label} complete` : cfg.label}
             >
@@ -1041,13 +1613,66 @@ export default function ExternalSigningPage() {
     );
   }
 
-  if (signed || info?.signer?.signingStatus === 'signed') {
+  if (info?.auth?.required && !info.auth.verified) {
     return (
       <div className="ext-root ext-screen">
-        <div className="ext-screen-mark ext-screen-mark--success" aria-hidden="true">OK</div>
-        <h1>You have signed this document</h1>
-        <p className="ext-screen-msg">Your signature has been recorded. You may close this tab.</p>
-        {info?.document?.name && <div className="ext-screen-docname">{info.document.name}</div>}
+        <div className="ext-screen-card ext-auth-card">
+          <div className="ext-screen-mark" aria-hidden="true">ID</div>
+          <h1>Verify your signing access</h1>
+          <p className="ext-screen-msg">
+            We will send a verification code to {info.signer?.maskedEmail || info.auth.maskedEmail || 'the signer email'} before showing the document.
+          </p>
+          <div className="ext-auth-actions">
+            <button type="button" className="ext-secondary-button ext-secondary-button--wide" onClick={sendAuthCode} disabled={authSending || authVerifying}>
+              {authSending ? 'Sending...' : 'Send Code'}
+            </button>
+            <form className="ext-auth-form" onSubmit={verifyAuthCode}>
+              <input
+                value={authCode}
+                onChange={(event) => setAuthCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="6 digit code"
+                aria-label="Verification code"
+              />
+              <button type="submit" className="ext-primary-button ext-primary-button--wide" disabled={authVerifying || authCode.length < 6}>
+                {authVerifying ? 'Verifying...' : 'Verify'}
+              </button>
+            </form>
+          </div>
+          {authNotice && <div className="ext-inline-note">{authNotice}</div>}
+          {authError && <div className="ext-inline-alert" role="alert">{authError}</div>}
+          {info?.document?.name && <div className="ext-screen-docname">{info.document.name}</div>}
+        </div>
+      </div>
+    );
+  }
+
+  if (signed || (info?.signer?.signingStatus === 'signed' && info?.auth?.verified)) {
+    return (
+      <div className="ext-root ext-screen">
+        <div className="ext-screen-card">
+          <div className="ext-screen-mark ext-screen-mark--success" aria-hidden="true">OK</div>
+          <h1>You have signed this document</h1>
+          <p className="ext-screen-msg">Your signature has been recorded in the signing audit trail.</p>
+          {completion?.signature?.signedAt && (
+            <div className="ext-receipt-grid">
+              <span>Signed</span>
+              <strong>{new Date(completion.signature.signedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</strong>
+              <span>Audit hash</span>
+              <strong>{completion.signature.auditHash?.slice(0, 18)}...</strong>
+              <span>Status</span>
+              <strong>{completion.finalization?.status === 'finalized' ? 'Finalized' : 'Recorded'}</strong>
+            </div>
+          )}
+          {completion?.downloadUrl && (
+            <button type="button" className="ext-primary-button ext-primary-button--wide" onClick={downloadFinalPdf} disabled={downloadingFinal}>
+              {downloadingFinal ? 'Preparing PDF...' : 'Download Signed PDF'}
+            </button>
+          )}
+          {downloadError && <div className="ext-inline-alert" role="alert">{downloadError}</div>}
+          {info?.document?.name && <div className="ext-screen-docname">{info.document.name}</div>}
+        </div>
       </div>
     );
   }
@@ -1099,8 +1724,8 @@ export default function ExternalSigningPage() {
             className="ext-primary-button"
             disabled={signatureDraft ? (draftReadyToSend ? !canSubmitDraft : false) : !canStartSigning}
             onClick={signatureDraft
-              ? (draftReadyToSend ? submitSignatureDraft : () => openSignatureModal(!draftHasInitials && pendingInitialsField ? pendingInitialsField : pendingSignatureField))
-              : () => openSignatureModal(pendingSignatureField)}
+              ? (draftReadyToSend ? submitSignatureDraft : () => { void openSignatureModal(!draftHasInitials && pendingInitialsField ? pendingInitialsField : pendingSignatureField); })
+              : () => { void openSignatureModal(pendingSignatureField); }}
           >
             {signatureDraft
               ? (draftReadyToSend ? (submittingSignature ? 'Sending...' : 'Send') : (!draftHasInitials ? 'Initials' : 'Sign'))
@@ -1144,11 +1769,20 @@ export default function ExternalSigningPage() {
           <div className="ext-progress-block">
             <div className="ext-progress-label">
               <span>Fields complete</span>
-              <strong>{completedFields} of {fields.length}</strong>
+              <strong>{completedFieldItems} of {fieldItemCount}</strong>
             </div>
             <div className="ext-progress-track" aria-hidden="true">
               <span style={{ width: `${fieldProgress}%` }} />
             </div>
+            {nextRequiredField && (
+              <button
+                type="button"
+                className="ext-next-field-button"
+                onClick={() => goToRequiredField(nextRequiredField)}
+              >
+                Next required field
+              </button>
+            )}
           </div>
 
           {actionError && <div className="ext-inline-alert" role="alert">{actionError}</div>}
@@ -1162,6 +1796,187 @@ export default function ExternalSigningPage() {
           {!actionError && !signatureDraft && signingBlockedReason && (
             <div className="ext-inline-note">{signingBlockedReason}</div>
           )}
+          {requiresMediaEvidence && (
+            <div className="ext-inline-note">
+              This request requires {evidenceMode === 'photo' ? 'a signer photo' : evidenceMode === 'video' ? 'signer video evidence' : 'audio/video evidence for RON review'} before it can be completed.
+            </div>
+          )}
+          {evidenceMode === 'ron' && (
+            <div className="ext-ron-card">
+              <div className="ext-ron-card-head">
+                <span>South African Notarization</span>
+                <strong className={ronSession?.status === 'live' ? 'ext-ron-badge--live' : undefined}>
+                  {ronSession?.status === 'live' ? '● LIVE' : ronTechCheck.status === 'passed' ? 'Ready' : 'Setup required'}
+                </strong>
+              </div>
+
+              {/* Notary credentials */}
+              <div className="ext-ron-detail">
+                <span>Notary Public</span>
+                <strong>{ronPolicy?.notary?.name || 'Assigned Notary'}</strong>
+              </div>
+              <div className="ext-ron-detail">
+                <span>Admission / Commission</span>
+                <strong>{ronPolicy?.notary?.admissionNumber || ronPolicy?.notary?.commissionNumber || 'Pending'}</strong>
+              </div>
+              <div className="ext-ron-detail">
+                <span>High Court province</span>
+                <strong>{ronPolicy?.notary?.province || ronPolicy?.notary?.commissionState || 'Pending'}</strong>
+              </div>
+              <div className="ext-ron-detail">
+                <span>Identity proofing</span>
+                <strong>
+                  {ronPolicy?.identityMethod === 'personal_knowledge'
+                    ? 'Notary personal knowledge'
+                    : ronPolicy?.identityMethod === 'sa_id_document'
+                      ? 'South African ID document'
+                      : ronPolicy?.identityMethod === 'passport_document'
+                        ? 'Passport document'
+                        : 'Government ID verification'}
+                </strong>
+              </div>
+
+              {/* SA document type info */}
+              {ronPolicy?.saDocumentType && (
+                <div className="ext-ron-detail">
+                  <span>Document type</span>
+                  <strong style={{ textTransform: 'capitalize' }}>{ronPolicy.saDocumentType.replace(/_/g, ' ')}</strong>
+                </div>
+              )}
+
+              {/* Waiting room — scheduled session */}
+              {sessionIsScheduledAndPending && (
+                <div className="ext-ron-waiting-room">
+                  <div className="ext-ron-waiting-icon">🗓</div>
+                  <div>
+                    <strong>Session scheduled</strong>
+                    <p>Your notarization session is booked for:</p>
+                    <div className="ext-ron-scheduled-time">
+                      {new Date(scheduledSessionAt).toLocaleString('en-ZA', {
+                        dateStyle: 'full',
+                        timeStyle: 'short',
+                        timeZone: 'Africa/Johannesburg',
+                      })} (SAST)
+                    </div>
+                    <p>Please return at this time. The Notary Public will start the live video session.</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Identity upload */}
+              <div className="ext-ron-detail">
+                <span>Identity status</span>
+                <strong className={ronIdentity?.status === 'verified' ? 'ext-ron-verified' : undefined}>
+                  {ronIdentity?.status === 'verified' ? '✓ Verified' : ronIdentity?.status || 'Not submitted'}
+                </strong>
+              </div>
+              {ronPolicy?.identityMethod !== 'personal_knowledge' && ronIdentity?.status !== 'verified' && (
+                <div className="ext-ron-upload">
+                  <p className="ext-ron-upload-hint">
+                    {ronPolicy?.identityMethod === 'passport_document'
+                      ? 'Upload a clear photo or scan of your valid passport (photo page).'
+                      : 'Upload a clear photo or scan of your South African ID book or smart ID card.'}
+                  </p>
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,application/pdf"
+                    onChange={(event) => {
+                      setRonIdentityFile(event.target.files?.[0] || null);
+                      setRonIdentityError('');
+                    }}
+                    aria-label="Upload identity document"
+                  />
+                  <button
+                    type="button"
+                    className="ext-secondary-button ext-secondary-button--wide"
+                    onClick={() => { void uploadRonIdentityDocument(); }}
+                    disabled={ronIdentityUploading || !ronIdentityFile}
+                  >
+                    {ronIdentityUploading ? 'Submitting for verification...' : 'Submit identity document'}
+                  </button>
+                </div>
+              )}
+              {ronIdentityError && <div className="ext-inline-alert" role="alert">{ronIdentityError}</div>}
+
+              {/* Live session */}
+              <div className="ext-ron-detail">
+                <span>Session status</span>
+                <strong>{ronSession?.status || 'awaiting notary'}</strong>
+              </div>
+              {ronSession?.meetingUrl && (
+                <div className="ext-ron-meeting">
+                  <a href={ronSession.meetingUrl} target="_blank" rel="noreferrer" className="ext-ron-join-link">
+                    Join live notarization session →
+                  </a>
+                  <iframe
+                    src={ronSession.meetingUrl}
+                    title="Live notarization session"
+                    allow="camera; microphone; fullscreen; display-capture"
+                  />
+                </div>
+              )}
+
+              {/* Tech check */}
+              <button
+                type="button"
+                className="ext-secondary-button ext-secondary-button--wide"
+                onClick={() => { void runRonTechCheck(); }}
+                disabled={ronTechCheck.status === 'checking'}
+              >
+                {ronTechCheck.status === 'checking'
+                  ? 'Checking camera and microphone...'
+                  : ronTechCheck.status === 'passed'
+                    ? '✓ Camera and microphone ready'
+                    : 'Test camera and microphone'}
+              </button>
+              {ronTechCheck.error && <div className="ext-inline-alert" role="alert">{ronTechCheck.error}</div>}
+
+              {/* SA notarization acknowledgement */}
+              <label className="ext-consent-check ext-consent-check--ron">
+                <input
+                  type="checkbox"
+                  checked={ronAcknowledged}
+                  onChange={(event) => setRonAcknowledged(event.target.checked)}
+                />
+                <span>
+                  I confirm that I am appearing before the Notary Public in a live audio/video session,
+                  my identity has been verified, and I am signing this document voluntarily and of my own free will
+                  in accordance with South African law.
+                </span>
+              </label>
+
+              {/* Apostille notice */}
+              {ronPolicy?.apostilleRequired && (
+                <div className="ext-ron-apostille-notice">
+                  <strong>Apostille required:</strong> This document will be used abroad. After notarization,
+                  an Apostille must be obtained from the Department of International Relations and Cooperation (DIRCO).
+                </div>
+              )}
+            </div>
+          )}
+          {mediaCaptureError && <div className="ext-inline-alert" role="alert">{mediaCaptureError}</div>}
+
+          <label className="ext-consent-check">
+            <input
+              type="checkbox"
+              checked={consentAccepted}
+              onChange={(event) => {
+                setConsentAccepted(event.target.checked);
+                if (event.target.checked && actionError === 'Accept electronic signature consent before sending.') {
+                  setActionError('');
+                }
+              }}
+            />
+            <span>{info?.consent?.text || 'I agree to use electronic records and signatures for this document.'}</span>
+          </label>
+          <label className="ext-consent-check ext-consent-check--optional">
+            <input
+              type="checkbox"
+              checked={includeLocationEvidence}
+              onChange={(event) => setIncludeLocationEvidence(event.target.checked)}
+            />
+            <span>Include my location in the signing evidence. Your browser will ask for permission before sharing it.</span>
+          </label>
 
           <div className="ext-side-actions">
             {signatureDraft ? (
@@ -1172,14 +1987,14 @@ export default function ExternalSigningPage() {
                 <button
                   type="button"
                   className="ext-secondary-button ext-secondary-button--wide"
-                  onClick={() => openSignatureModal(!draftHasInitials && pendingInitialsField ? pendingInitialsField : pendingSignatureField)}
+                  onClick={() => { void openSignatureModal(!draftHasInitials && pendingInitialsField ? pendingInitialsField : pendingSignatureField); }}
                 >
                   {!draftHasInitials ? 'Add Initials' : 'Edit Signature'}
                 </button>
               </>
             ) : (
               <>
-                <button type="button" className="ext-primary-button ext-primary-button--wide" disabled={!canStartSigning} onClick={() => openSignatureModal(pendingSignatureField)}>
+                <button type="button" className="ext-primary-button ext-primary-button--wide" disabled={!canStartSigning} onClick={() => { void openSignatureModal(pendingSignatureField); }}>
                   Sign Document
                 </button>
                 <button type="button" className="ext-secondary-button ext-secondary-button--wide" onClick={() => setShowDeclineModal(true)}>
@@ -1191,6 +2006,7 @@ export default function ExternalSigningPage() {
 
           <p className="ext-legal-copy">
             By signing, you consent to transact electronically and to use an electronic signature for this document.
+            {linkExpiryLabel ? ` This link expires ${linkExpiryLabel}.` : ''}
           </p>
         </aside>
       </main>
@@ -1203,7 +2019,10 @@ export default function ExternalSigningPage() {
           captureMode={captureMode}
           initialFocus={signatureFocus}
           submitLabel={captureMode === 'initials' ? 'Save Initials' : 'Preview Signature'}
-          onClose={() => setShowModal(false)}
+          onClose={() => {
+            if (captureMode === 'signature' && !signatureDraft?.signatureData) cancelActiveMediaCapture();
+            setShowModal(false);
+          }}
           onSigned={handleSign}
         />
       )}

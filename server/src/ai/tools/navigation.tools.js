@@ -23,13 +23,19 @@ const PAGE_MAP = {
   analytics:     '/reports',
   settings:      '/settings',
   setting:       '/settings',
-  users:         '/settings/users',
-  profile:       '/profile',
+  users:           '/settings/users',
+  profile:         '/profile',
+  'legal requests': '/legal-requests',
+  'legal request':  '/legal-requests',
+  legalrequests:   '/legal-requests',
+  'ai audit':      '/ai/audit',
+  'audit log':     '/ai/audit',
 };
 
 const TOOL_DESCRIPTIONS = [
   { tool: 'search_contracts',          description: 'Search contracts by title, type, status, or counterparty' },
   { tool: 'get_contract_status',       description: 'Get full details and status for a specific contract' },
+  { tool: 'get_expired_contracts',      description: 'Count or list contracts that have already expired' },
   { tool: 'count_expiring_contracts',  description: 'Count contracts expiring within N days' },
   { tool: 'list_expiring_contracts',   description: 'List contracts expiring within N days' },
   { tool: 'show_contract_parties',     description: 'Show all parties and signatories for a contract' },

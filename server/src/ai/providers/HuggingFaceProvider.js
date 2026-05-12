@@ -1,9 +1,18 @@
 const fetch = require('node-fetch');
 const { AIModelProvider } = require('./AIModelProvider');
 
+/**
+ * Hugging Face cloud inference provider only.
+ *
+ * Do not use this provider for local models downloaded from Hugging Face.
+ * Downloaded models must run through LocalProvider or OllamaProvider.
+ */
 class HuggingFaceProvider extends AIModelProvider {
   constructor(config = {}) {
     super();
+    if (config.localModelPath || process.env.LOCAL_MODEL_PATH) {
+      throw new Error('A LOCAL_MODEL_PATH was provided, but ACTIVE_MODEL_PROVIDER=huggingface uses cloud inference. Use ACTIVE_MODEL_PROVIDER=local to run a downloaded model locally.');
+    }
     this._name   = config.modelName || process.env.HF_MODEL || 'Qwen/Qwen2.5-7B-Instruct';
     this._apiKey = config.apiKey    || process.env.HF_API_KEY || '';
     this._caps = {
@@ -18,9 +27,17 @@ class HuggingFaceProvider extends AIModelProvider {
 
   get name()         { return this._name; }
   get family()       { return 'cloud'; }
+  get usesCloudInference() { return true; }
   get capabilities() { return this._caps; }
 
   async generate(input) {
+    if (process.env.ALLOW_CLOUD_AI !== 'true') {
+      return {
+        type: 'error',
+        message: 'Hugging Face cloud provider is disabled because ALLOW_CLOUD_AI=false. Use ACTIVE_MODEL_PROVIDER=local for downloaded models.',
+      };
+    }
+
     if (!this._apiKey || this._apiKey.startsWith('hf_your')) {
       return { type: 'error', message: 'HuggingFace API key not configured. Add HF_API_KEY to your .env.' };
     }
@@ -61,6 +78,12 @@ class HuggingFaceProvider extends AIModelProvider {
   }
 
   async healthCheck() {
+    if (process.env.ALLOW_CLOUD_AI !== 'true') {
+      return {
+        healthy: false,
+        error: 'Hugging Face cloud provider is disabled because ALLOW_CLOUD_AI=false. Use ACTIVE_MODEL_PROVIDER=local for downloaded models.',
+      };
+    }
     if (!this._apiKey || this._apiKey.startsWith('hf_your')) {
       return { healthy: false, error: 'API key not configured' };
     }
@@ -68,13 +91,18 @@ class HuggingFaceProvider extends AIModelProvider {
   }
 
   _buildPrompt(input) {
+    // Use the ChatML format expected by Qwen2.5-Instruct and most modern instruction models.
+    // The generic "System: / User: / Assistant:" format does not match the model's training
+    // format and causes unreliable instruction-following.
     let prompt = '';
-    if (input.systemPrompt) prompt += `System: ${input.systemPrompt}\n\n`;
-    for (const m of (input.messages || [])) {
-      const role = m.role === 'user' ? 'User' : 'Assistant';
-      prompt += `${role}: ${m.content || m.text || ''}\n`;
+    if (input.systemPrompt) {
+      prompt += `<|im_start|>system\n${input.systemPrompt}<|im_end|>\n`;
     }
-    prompt += 'Assistant: ';
+    for (const m of (input.messages || [])) {
+      const role = m.role === 'assistant' ? 'assistant' : 'user';
+      prompt += `<|im_start|>${role}\n${m.content || m.text || ''}<|im_end|>\n`;
+    }
+    prompt += '<|im_start|>assistant\n';
     return prompt;
   }
 
