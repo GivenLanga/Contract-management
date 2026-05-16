@@ -93,6 +93,28 @@ const templateSchema = new mongoose.Schema({
 
   // ── Preview ───────────────────────────────────────────────────────────────
   previewImage: { type: String },
+
+  // ── Source ownership kind ─────────────────────────────────────────────────
+  // LEGAL_FOLDER_SYNC: mirror metadata from a synced Legal Folder source
+  // SERVER_UPLOAD: file-backed template uploaded through the admin UI
+  // GENERATED: AI-generated template (future phase)
+  sourceKind: {
+    type: String,
+    enum: ['LEGAL_FOLDER_SYNC', 'SERVER_UPLOAD', 'GENERATED'],
+    default: 'LEGAL_FOLDER_SYNC',
+  },
+
+  // ── Legal Folder provenance (LEGAL_FOLDER_SYNC records only) ─────────────
+  legalFolderSourceId: { type: String },
+  legalFolderRootName: { type: String },
+  legalFolderLabel: { type: String },
+  relativePath: { type: String },
+  // Stable content-address key: LEGAL_FOLDER_SYNC::{sourceId}::{normPath} (SHA-256)
+  sourceKey: { type: String },
+
+  // ── Orphan lifecycle ──────────────────────────────────────────────────────
+  isOrphaned: { type: Boolean, default: false },
+  legalFolderDisconnectedAt: { type: Date },
 }, { timestamps: true });
 
 // Compound index for deduplication during discovery
@@ -102,5 +124,11 @@ templateSchema.index({ documentId: 1 }, { sparse: true });
 templateSchema.index({ status: 1, approvalStatus: 1, isActive: 1 });
 templateSchema.index({ agreementFamily: 1 });
 templateSchema.index({ category: 1 });
+
+// Idempotent sync dedup: (sourceKind, sourceKey) must be unique when sourceKey is present
+templateSchema.index({ sourceKind: 1, sourceKey: 1 }, { unique: true, sparse: true });
+templateSchema.index({ legalFolderSourceId: 1, sourceKind: 1 });
+templateSchema.index({ isDiscovered: 1, isActive: 1 });
+templateSchema.index({ isOrphaned: 1 });
 
 module.exports = mongoose.model('Template', templateSchema);

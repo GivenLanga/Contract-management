@@ -3,7 +3,6 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const { v4: uuidv4 } = require('uuid');
 
 const Template = require('../models/Template');
 const Document = require('../models/Document');
@@ -11,6 +10,7 @@ const { protect, requireRole } = require('../middleware/auth');
 const { templateUpload } = require('../middleware/upload');
 const { discoverTemplates } = require('../services/templateDiscoveryService');
 const { classify, cleanTitle, buildTags, displaySourceLabel, isSupportedExtension } = require('../services/templateClassifier');
+const { sanitizeFilename, resolveDraftFilename } = require('../services/templateDraftPathService');
 
 const router = express.Router();
 
@@ -18,11 +18,9 @@ const router = express.Router();
 
 function visibilityFilter(user) {
   if (user.role === 'admin' || user.role === 'manager') {
-    // Admins/managers see everything including PENDING_REVIEW templates
-    return { isActive: true };
+    return { isActive: true, isOrphaned: { $ne: true } };
   }
-  // Normal users see only active, approved templates
-  return { isActive: true, status: 'ACTIVE', approvalStatus: 'APPROVED' };
+  return { isActive: true, isOrphaned: { $ne: true }, status: 'ACTIVE', approvalStatus: 'APPROVED' };
 }
 
 // ── GET /api/templates/facets ─────────────────────────────────────────────────
@@ -54,27 +52,49 @@ router.get('/facets', protect, async (req, res) => {
 // ── GET /api/templates/diagnostics ───────────────────────────────────────────
 router.get('/diagnostics', protect, requireRole('admin', 'manager'), async (req, res) => {
   try {
-    const [total, active, discovered, uploaded, pending] = await Promise.all([
-      Template.countDocuments({ isActive: true }),
-      Template.countDocuments({ isActive: true, status: 'ACTIVE' }),
-      Template.countDocuments({ isDiscovered: true }),
-      Template.countDocuments({ isUploaded: true }),
-      Template.countDocuments({ isActive: true, status: 'PENDING_REVIEW' }),
-    ]);
-
-    // Most recent lastScannedAt across all templates
-    const lastSynced = await Template.findOne({ lastScannedAt: { $exists: true } })
-      .sort({ lastScannedAt: -1 })
-      .select('lastScannedAt')
-      .lean();
+    const [total, active, discovered, uploaded, orphaned, pending, lastSynced, bySourceRaw] =
+      await Promise.all([
+        Template.countDocuments({ isActive: true }),
+        Template.countDocuments({ isActive: true, status: 'ACTIVE' }),
+        Template.countDocuments({ isDiscovered: true }),
+        Template.countDocuments({ isUploaded: true }),
+        Template.countDocuments({ isOrphaned: true }),
+        Template.countDocuments({ isActive: true, status: 'PENDING_REVIEW' }),
+        Template.findOne({ lastScannedAt: { $exists: true } })
+          .sort({ lastScannedAt: -1 })
+          .select('lastScannedAt')
+          .lean(),
+        Template.aggregate([
+          { $match: { sourceKind: 'LEGAL_FOLDER_SYNC', legalFolderSourceId: { $exists: true, $ne: null } } },
+          {
+            $group: {
+              _id: '$legalFolderSourceId',
+              count: { $sum: 1 },
+              activeCount: { $sum: { $cond: [{ $eq: ['$isActive', true] }, 1, 0] } },
+              orphanedCount: { $sum: { $cond: [{ $eq: ['$isOrphaned', true] }, 1, 0] } },
+            },
+          },
+          {
+            $project: {
+              _id: 0,
+              legalFolderSourceId: '$_id',
+              count: 1,
+              activeCount: 1,
+              orphanedCount: 1,
+            },
+          },
+        ]),
+      ]);
 
     res.json({
       totalTemplates: total,
       activeTemplates: active,
       discoveredTemplates: discovered,
       uploadedTemplates: uploaded,
+      orphanedTemplates: orphaned,
       pendingReviewTemplates: pending,
       lastSync: lastSynced?.lastScannedAt || null,
+      bySource: bySourceRaw,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -84,12 +104,14 @@ router.get('/diagnostics', protect, requireRole('admin', 'manager'), async (req,
 // ── POST /api/templates/discover ─────────────────────────────────────────────
 router.post('/discover', protect, requireRole('admin', 'manager'), async (req, res) => {
   try {
-    // candidates: template metadata objects the frontend collected from localStorage
     const candidates = Array.isArray(req.body.candidates) ? req.body.candidates : [];
+    // legalFolderSource: { id, name, syncedAt } — enables idempotent upsert + stale removal
+    const legalFolderSource = req.body.legalFolderSource || null;
 
     const summary = await discoverTemplates({
       candidates,
       userId: req.user._id,
+      legalFolderSource,
     });
 
     res.json({
@@ -99,9 +121,38 @@ router.post('/discover', protect, requireRole('admin', 'manager'), async (req, r
         imported: summary.imported,
         updated: summary.updated,
         skipped: summary.skipped,
+        skippedDuplicates: summary.skippedDuplicates,
+        removedStale: summary.removedStale,
         failed: summary.failed,
+        sourceId: summary.sourceId,
         warnings: summary.warnings,
       },
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST /api/templates/disconnect-source ─────────────────────────────────────
+// Removes all LEGAL_FOLDER_SYNC templates belonging to a disconnected source.
+// SERVER_UPLOAD templates are never touched.
+router.post('/disconnect-source', protect, requireRole('admin', 'manager'), async (req, res) => {
+  try {
+    const { legalFolderSourceId } = req.body;
+    if (!legalFolderSourceId) {
+      return res.status(400).json({ error: 'legalFolderSourceId is required.' });
+    }
+
+    const result = await Template.deleteMany({
+      sourceKind: 'LEGAL_FOLDER_SYNC',
+      legalFolderSourceId: String(legalFolderSourceId),
+    });
+
+    const n = result.deletedCount;
+    res.json({
+      removed: n,
+      sourceId: legalFolderSourceId,
+      message: `Removed ${n} discovered template${n !== 1 ? 's' : ''} from disconnected Legal Folder source.`,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -234,6 +285,7 @@ router.post(
         filePath: req.file.path,
         sourceFolder: 'Uploaded',
         sourceType: 'UPLOADED',
+        sourceKind: 'SERVER_UPLOAD',
         mimeType: req.file.mimetype,
         extension: ext,
         fileType: ext === 'pdf' ? 'pdf' : ext === 'doc' ? 'doc' : 'docx',
@@ -289,6 +341,7 @@ router.post(
         filePath: req.file.path,
         sourceFolder: 'Uploaded',
         sourceType: 'UPLOADED',
+        sourceKind: 'SERVER_UPLOAD',
         mimeType: req.file.mimetype,
         extension: ext,
         fileType: ext === 'pdf' ? 'pdf' : 'docx',
@@ -317,53 +370,143 @@ router.post(
 );
 
 // ── POST /api/templates/:id/draft ─────────────────────────────────────────────
-// Creates a working copy of a template as a Document draft.
-// Phase 2 placeholder: the draft is created but the frontend Use modal now
-// shows a "coming in Phase 2" message instead of this flow.
+// Legal Folder templates (LEGAL_FOLDER_SYNC) are now drafted entirely client-side
+// using the browser File System Access API and JSZip. The backend is no longer the
+// primary file store for these templates.
+//
+// SERVER_UPLOAD templates that have a backing file on disk are still supported
+// server-side for compatibility, but this path is no longer the primary flow.
 router.post('/:id/draft', protect, async (req, res) => {
   try {
     const template = await Template.findById(req.params.id);
     if (!template) return res.status(404).json({ error: 'Template not found.' });
 
-    // For metadata-only discovered templates (no server-side file), we cannot
-    // create a physical draft copy yet — that is Phase 2 territory.
-    if (!template.path || !fs.existsSync(template.path)) {
-      return res.status(409).json({
-        error: 'Draft creation from this template requires Phase 2 integration.',
-        phase2: true,
+    // Legal Folder templates must be drafted client-side — the server does not hold
+    // the file and should not be asked to create drafts for them.
+    if (template.sourceKind === 'LEGAL_FOLDER_SYNC') {
+      return res.status(410).json({
+        code: 'DRAFT_CLIENT_SIDE',
+        message:
+          'This template is sourced from a connected Legal Folder. ' +
+          'Drafts are created directly in the browser from the cached template file. ' +
+          'Use the "Use" button on the Templates page to create a draft.',
+        actions: [
+          'Open the Templates page and click Use on this template.',
+          'Ensure the Legal Folder is connected and synced so the file is cached.',
+        ],
       });
     }
 
-    const { taskId, contractId, draftName } = req.body;
-    const ext = path.extname(template.filename || template.originalFileName || '.docx');
-    const newFilename = `draft_${uuidv4()}${ext}`;
-    const uploadDir = path.join(__dirname, '../../uploads');
+    if (!template.isActive) {
+      return res.status(403).json({ error: 'This template is not active.' });
+    }
 
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+    const isPrivileged = req.user.role === 'admin' || req.user.role === 'manager';
+    if (!isPrivileged && (template.status !== 'ACTIVE' || template.approvalStatus !== 'APPROVED')) {
+      return res.status(403).json({ error: 'This template is not approved for use.' });
+    }
 
-    const newPath = path.join(uploadDir, newFilename);
-    fs.copyFileSync(template.path, newPath);
+    // SERVER_UPLOAD: check that a physical file is present on the server.
+    const templateFilePath = template.path || template.filePath;
+    if (!templateFilePath || !fs.existsSync(templateFilePath)) {
+      return res.status(409).json({
+        code: 'TEMPLATE_FILE_UNAVAILABLE',
+        message: 'The template file is not available on the server.',
+        actions: ['Upload the template file again or contact an administrator.'],
+      });
+    }
 
-    const docName = draftName || `${template.name} – Draft (${new Date().toLocaleDateString()})`;
-    const doc = await Document.create({
-      name: docName,
-      originalName: `${template.name}${ext}`,
-      filename: newFilename,
-      path: newPath,
-      mimetype: template.mimeType || (template.fileType === 'pdf'
+    const {
+      documentTitle,
+      counterparty,
+      department,
+      category,
+      effectiveDate,
+      legalRequestId,
+      placeholderValues,
+      notes,
+    } = req.body;
+
+    const defaultTitle = `${template.title || template.name} - Draft`;
+    const rawTitle = (typeof documentTitle === 'string' && documentTitle.trim())
+      ? documentTitle.trim()
+      : defaultTitle;
+    const safeTitle = sanitizeFilename(rawTitle);
+
+    const year = new Date().getFullYear();
+    const safeCategory = sanitizeFilename(category || template.category || 'General');
+    const destRelDir = path.join('generated-drafts', String(year), safeCategory);
+    const destAbsDir = path.join(__dirname, '../../uploads', destRelDir);
+
+    if (!fs.existsSync(destAbsDir)) fs.mkdirSync(destAbsDir, { recursive: true });
+
+    const ext = path.extname(templateFilePath) || `.${template.extension || 'docx'}`;
+    const { filename: draftFilename, filePath: draftAbsPath } =
+      resolveDraftFilename(destAbsDir, safeTitle, ext);
+
+    fs.copyFileSync(templateFilePath, draftAbsPath);
+
+    const mime = template.mimeType
+      || (ext === '.pdf'
         ? 'application/pdf'
-        : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
-      type: template.fileType === 'pdf' ? 'pdf' : 'docx',
-      task: taskId || undefined,
-      contract: contractId || undefined,
+        : 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+
+    const displayPath = path
+      .join('generated-drafts', String(year), safeCategory, draftFilename)
+      .replace(/\\/g, '/');
+
+    const doc = await Document.create({
+      name: safeTitle,
+      originalName: draftFilename,
+      filename: draftFilename,
+      path: draftAbsPath,
+      mimetype: mime,
+      size: fs.statSync(draftAbsPath).size,
+      type: ext === '.pdf' ? 'pdf' : ext === '.doc' ? 'doc' : 'docx',
       uploadedBy: req.user._id,
       status: 'Draft',
-      description: `Draft created from template: ${template.name}`,
+      documentStage: 'DRAFT',
+      description: notes?.trim() || `Draft created from template: ${template.title || template.name}`,
+      legalRequest: legalRequestId || undefined,
+      tags: [
+        department ? `dept:${sanitizeFilename(department)}` : null,
+        counterparty ? `counterparty:${sanitizeFilename(counterparty)}` : null,
+        effectiveDate ? `effective:${effectiveDate}` : null,
+      ].filter(Boolean),
+      createdFromTemplate: true,
+      templateId: template._id,
+      templateTitle: template.title || template.name,
+      templateVersionLabel: template.versionLabel || undefined,
+      agreementFamily: template.agreementFamily || undefined,
+      sourceTemplateFileName: template.originalFileName || undefined,
     });
 
-    await Template.updateOne({ _id: template._id }, { $inc: { usageCount: 1 }, $set: { lastUsedAt: new Date() } });
+    await Template.updateOne(
+      { _id: template._id },
+      { $inc: { usageCount: 1 }, $set: { lastUsedAt: new Date() } }
+    );
 
-    res.status(201).json({ document: doc, downloadUrl: `/uploads/${newFilename}` });
+    res.status(201).json({
+      type: 'draft_created_from_template',
+      message: 'Draft created successfully.',
+      template: {
+        id: template._id,
+        title: template.title || template.name,
+        agreementFamily: template.agreementFamily,
+        versionLabel: template.versionLabel,
+      },
+      document: {
+        id: doc._id,
+        title: doc.name,
+        fileName: draftFilename,
+        stage: doc.documentStage,
+        status: doc.status,
+        displayPath,
+        createdFromTemplate: doc.createdFromTemplate,
+        templateId: doc.templateId,
+      },
+      warnings: [],
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

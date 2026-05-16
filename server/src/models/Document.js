@@ -174,6 +174,14 @@ const documentSchema = new mongoose.Schema({
   },
   tags: [{ type: String }],
   description: { type: String },
+
+  // Template draft linkage — optional, only populated when doc was created from a template
+  createdFromTemplate: { type: Boolean, default: false },
+  templateId: { type: mongoose.Schema.Types.ObjectId, ref: 'Template' },
+  templateTitle: { type: String },
+  templateVersionLabel: { type: String },
+  agreementFamily: { type: String },
+  sourceTemplateFileName: { type: String },
 }, { timestamps: true });
 
 documentSchema.methods.setPassword = function (password) {

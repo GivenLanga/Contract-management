@@ -10,6 +10,8 @@ import {
 } from '../../services/legalFolderStore';
 import { clearLegalFolderFiles, replaceLegalFolderFiles } from '../../services/legalFolderFileStore';
 import { syncLegalFolderRagIndex } from '../../services/legalFolderRagSync';
+import { templates as templatesApi } from '../../services/api';
+import { setLegalFolderHandle, clearLegalFolderHandle } from '../../services/legalFolderHandle';
 import './LegalFolder.css';
 
 export default function LegalFolder() {
@@ -19,6 +21,7 @@ export default function LegalFolder() {
   const [total, setTotal] = useState(initialSnapshot.documents?.length || 0);
   const [importing, setImporting] = useState(false);
   const [syncError, setSyncError] = useState('');
+  const [disconnectMsg, setDisconnectMsg] = useState('');
   const [source, setSource] = useState(initialSnapshot.source || null);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
@@ -52,7 +55,9 @@ export default function LegalFolder() {
 
     try {
       if ('showDirectoryPicker' in window) {
-        const directoryHandle = await window.showDirectoryPicker({ mode: 'read' });
+        // readwrite mode enables draft write-back into the connected Legal Folder
+        const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        setLegalFolderHandle(directoryHandle);
         const entries = await collectFilesFromDirectoryHandle(directoryHandle);
         await syncEntries(entries, directoryHandle.name);
       } else {
@@ -91,13 +96,29 @@ export default function LegalFolder() {
     }
   };
 
-  const handleDisconnect = () => {
+  const handleDisconnect = async () => {
+    const sourceId = source?.name || null;
+
+    // Clear local state and directory handle first so the UI responds immediately
     clearLegalFolderImport();
+    clearLegalFolderHandle();
     clearLegalFolderFiles().catch(() => {});
     setDocs([]);
     setTotal(0);
     setSource(null);
     setSyncError('');
+    setDisconnectMsg('');
+
+    if (sourceId) {
+      try {
+        await templatesApi.disconnectSource(sourceId);
+        setDisconnectMsg('Legal Folder disconnected. Discovered templates from this folder were removed.');
+      } catch {
+        setDisconnectMsg('Legal Folder disconnected locally, but server cleanup failed. Retry template cleanup.');
+      }
+    } else {
+      setDisconnectMsg('Legal Folder disconnected.');
+    }
   };
 
   const filtered = docs.filter((d) => {
@@ -158,6 +179,12 @@ export default function LegalFolder() {
           />
         </div>
       </div>
+
+      {disconnectMsg && (
+        <div className="legal-folder-source legal-folder-source--disconnect">
+          <span>{disconnectMsg}</span>
+        </div>
+      )}
 
       {(source || syncError) && (
         <div className={`legal-folder-source${syncError ? ' legal-folder-source--error' : ''}`}>

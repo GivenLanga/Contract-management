@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const Template = require('../models/Template');
@@ -8,32 +9,46 @@ const {
   classify,
   cleanTitle,
   buildTags,
-  displaySourceLabel,
   isTemplatePath,
   shouldSkip,
   isSupportedExtension,
   getExtension,
 } = require('./templateClassifier');
 
-// Backend disk paths this service can access directly
 const BACKEND_TEMPLATES_DIR = path.join(__dirname, '../../templates');
-const BACKEND_UPLOADS_LEGAL_FOLDER = path.join(__dirname, '../../uploads/legal-folder');
 
 /**
- * Discovers templates from three sources:
+ * Computes a stable, unique source key for a LEGAL_FOLDER_SYNC candidate.
+ * SHA-256 of "LEGAL_FOLDER_SYNC::{sourceId}::{normalizedPath}" so that the
+ * same file from the same source always produces the same key across syncs.
  *
- *  1. Frontend-provided candidates (from browser localStorage/IndexedDB) — the
- *     caller is responsible for filtering these to template paths before sending.
- *  2. MongoDB Document records with isInLegalFolder=true whose legalFolderPath
- *     matches a recognised template folder name.
- *  3. Backend-accessible disk directories: server/templates/ and
- *     server/uploads/legal-folder/ (only scanned when a template-like path
- *     can be inferred from the file or its location).
+ * @param {string} legalFolderSourceId
+ * @param {object} candidate  — must have at least one of: sourcePath, name
+ * @returns {string} hex SHA-256 digest
+ */
+function computeSourceKey(legalFolderSourceId, candidate) {
+  const sourceId = String(legalFolderSourceId || '').toLowerCase().trim();
+  const rawPath = String(candidate.sourcePath || candidate.name || '')
+    .replace(/\\/g, '/')
+    .toLowerCase()
+    .trim();
+  return crypto.createHash('sha256')
+    .update(`LEGAL_FOLDER_SYNC::${sourceId}::${rawPath}`)
+    .digest('hex');
+}
+
+/**
+ * Discovers and idempotently upserts templates from multiple sources.
  *
- * @param {{ candidates?: object[], userId?: string }} options
+ * @param {{ candidates?: object[], userId?: string, legalFolderSource?: object }} options
+ *   legalFolderSource: { id, name, syncedAt } — metadata for the Legal Folder
+ *   source that produced the candidates. When present, enables sourceKey-based
+ *   upsert and stale record removal.
  * @returns {Promise<object>} summary
  */
-async function discoverTemplates({ candidates = [], userId } = {}) {
+async function discoverTemplates({ candidates = [], userId, legalFolderSource } = {}) {
+  const legalFolderSourceId = legalFolderSource?.id || null;
+
   const summary = {
     source: 'discover',
     scanned: 0,
@@ -41,28 +56,54 @@ async function discoverTemplates({ candidates = [], userId } = {}) {
     imported: 0,
     updated: 0,
     skipped: 0,
+    skippedDuplicates: 0,
+    removedStale: 0,
     failed: 0,
+    sourceId: legalFolderSourceId,
     warnings: [],
   };
 
-  // Tracks dedup keys so a file is not imported twice across sources
+  // Tracks dedup keys across all sources within this call
   const seen = new Set();
+  // Tracks sourceKeys encountered in this sync (used for stale removal)
+  const seenSourceKeys = new Set();
 
-  // ── 1. Frontend-provided candidates ────────────────────────────────────────
+  // ── 1. Frontend-provided candidates (LEGAL_FOLDER_SYNC) ───────────────────
   if (Array.isArray(candidates) && candidates.length > 0) {
     for (const candidate of candidates) {
       summary.scanned++;
       try {
-        const outcome = await _processFrontendCandidate(candidate, userId, seen);
-        _tally(summary, outcome);
+        const outcome = await _processFrontendCandidate(
+          candidate, userId, seen, seenSourceKeys, legalFolderSourceId
+        );
+        if (outcome === 'duplicate') {
+          summary.skippedDuplicates++;
+        } else {
+          _tally(summary, outcome);
+        }
       } catch (err) {
         summary.failed++;
         summary.warnings.push(`Failed to import "${candidate.name}": ${err.message}`);
       }
     }
+
+    // Remove stale LEGAL_FOLDER_SYNC records from this source that were not
+    // seen in this sync — they are no longer present in the Legal Folder.
+    if (legalFolderSourceId && seenSourceKeys.size > 0) {
+      try {
+        const removeResult = await Template.deleteMany({
+          sourceKind: 'LEGAL_FOLDER_SYNC',
+          legalFolderSourceId: String(legalFolderSourceId),
+          sourceKey: { $nin: Array.from(seenSourceKeys) },
+        });
+        summary.removedStale = removeResult.deletedCount;
+      } catch (err) {
+        summary.warnings.push(`Stale template removal failed: ${err.message}`);
+      }
+    }
   }
 
-  // ── 2. MongoDB legal folder documents with template paths ──────────────────
+  // ── 2. MongoDB legal folder documents with template-like paths ────────────
   try {
     const legalDocs = await Document.find({ isInLegalFolder: true })
       .select('name originalName legalFolderPath filename path mimetype fileSize size updatedAt')
@@ -94,19 +135,14 @@ async function discoverTemplates({ candidates = [], userId } = {}) {
     summary.warnings.push(`Could not query legal folder documents from MongoDB: ${err.message}`);
   }
 
-  // ── 3. Backend disk: server/templates/ ────────────────────────────────────
+  // ── 3. Backend disk: server/templates/ (SERVER_UPLOAD) ────────────────────
   try {
-    await _scanDiskDirectory(BACKEND_TEMPLATES_DIR, 'UPLOADED', summary, seen, userId);
+    await _scanDiskDirectory(BACKEND_TEMPLATES_DIR, summary, seen, userId);
   } catch (err) {
     if (err.code !== 'ENOENT') {
       summary.warnings.push(`Could not scan server/templates/: ${err.message}`);
     }
   }
-
-  // Note: server/uploads/legal-folder/ contains UUID-named files with no
-  // obvious template signal in the filename itself, so we don't scan it
-  // blindly — its contents are already discoverable via the MongoDB query
-  // above (those Document records have legalFolderPath set).
 
   if (summary.imported === 0 && summary.updated === 0 && candidates.length === 0) {
     summary.warnings.push(
@@ -121,21 +157,22 @@ async function discoverTemplates({ candidates = [], userId } = {}) {
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /**
- * Imports a single frontend-provided template candidate.
- * The candidate is a document metadata object from the browser localStorage.
+ * Idempotent upsert for a single frontend-provided template candidate.
+ * Lookup priority:
+ *  1. sourceKey (new stable hash) — prevents duplicates across syncs
+ *  2. legacy storageKey / (originalFileName + sourceFolder) — migrates old records
+ *  3. Create new record
  *
- * @param {object} candidate
- * @param {string|undefined} userId
- * @param {Set<string>} seen
- * @returns {Promise<'imported'|'updated'|'skipped'>}
+ * @returns {Promise<'imported'|'updated'|'skipped'|'duplicate'>}
  */
-async function _processFrontendCandidate(candidate, userId, seen) {
-  const { name, sourcePath, type: _type, size, _id: frontendId, updatedAt } = candidate;
+async function _processFrontendCandidate(candidate, userId, seen, seenSourceKeys, legalFolderSourceId) {
+  const { name, sourcePath, size, _id: frontendId, updatedAt } = candidate;
 
   if (!name || shouldSkip(name) || !isSupportedExtension(name)) return 'skipped';
 
+  // Dedup within this payload (same path submitted twice)
   const dedupKey = `frontend:${sourcePath || name}`;
-  if (seen.has(dedupKey)) return 'skipped';
+  if (seen.has(dedupKey)) return 'duplicate';
   seen.add(dedupKey);
 
   const { title, version } = cleanTitle(name);
@@ -144,20 +181,44 @@ async function _processFrontendCandidate(candidate, userId, seen) {
   const folderLabel = _extractFolderLabel(sourcePath);
   const storeKey = `legal_folder:${frontendId || sourcePath}`;
 
-  // Check for existing record
-  const existing = await Template.findOne({
+  // Compute stable sourceKey when we have a source identifier
+  const sourceKey = legalFolderSourceId
+    ? computeSourceKey(legalFolderSourceId, candidate)
+    : null;
+
+  if (sourceKey) seenSourceKeys.add(sourceKey);
+
+  // 1. Idempotent lookup by sourceKey (preferred, collision-proof)
+  if (sourceKey && legalFolderSourceId) {
+    const existing = await Template.findOne({ sourceKind: 'LEGAL_FOLDER_SYNC', sourceKey });
+    if (existing) {
+      await Template.updateOne(
+        { _id: existing._id },
+        { $set: { lastScannedAt: new Date(), updatedBy: userId, legalFolderSourceId } }
+      );
+      return 'updated';
+    }
+  }
+
+  // 2. Legacy dedup for pre-migration records — update them with new fields
+  const existingLegacy = await Template.findOne({
     $or: [
       { storageKey: storeKey },
       { originalFileName: name, sourceFolder: folderLabel },
     ],
   });
 
-  if (existing) {
-    await Template.updateOne({ _id: existing._id }, { $set: { lastScannedAt: new Date(), updatedBy: userId } });
+  if (existingLegacy) {
+    const patch = { lastScannedAt: new Date(), updatedBy: userId };
+    if (sourceKey) patch.sourceKey = sourceKey;
+    if (legalFolderSourceId) patch.legalFolderSourceId = legalFolderSourceId;
+    if (!existingLegacy.sourceKind) patch.sourceKind = 'LEGAL_FOLDER_SYNC';
+    await Template.updateOne({ _id: existingLegacy._id }, { $set: patch });
     return 'updated';
   }
 
-  await Template.create({
+  // 3. Create new record
+  const doc = {
     name: title,
     title,
     description: `Discovered from Legal Folder — ${folderLabel || 'Templates'}`,
@@ -165,6 +226,7 @@ async function _processFrontendCandidate(candidate, userId, seen) {
     sourcePath,
     sourceFolder: folderLabel,
     sourceType: 'DISCOVERED',
+    sourceKind: 'LEGAL_FOLDER_SYNC',
     storageKey: storeKey,
     extension: ext,
     fileType: _normaliseFileType(ext),
@@ -182,19 +244,19 @@ async function _processFrontendCandidate(candidate, userId, seen) {
     isActive: true,
     lastScannedAt: new Date(),
     createdBy: userId,
-    updatedAt: updatedAt ? new Date(updatedAt) : undefined,
-  });
+  };
 
+  if (sourceKey) doc.sourceKey = sourceKey;
+  if (legalFolderSourceId) doc.legalFolderSourceId = legalFolderSourceId;
+  if (updatedAt) doc.updatedAt = new Date(updatedAt);
+
+  await Template.create(doc);
   return 'imported';
 }
 
 /**
- * Creates or refreshes a Template record from a MongoDB Document record that
- * lives in the legal folder and has a template-like source path.
- *
- * @param {object} doc  - Mongoose Document lean object
- * @param {string|undefined} userId
- * @returns {Promise<'imported'|'updated'|'skipped'>}
+ * Creates or refreshes a Template record from a MongoDB Document that lives
+ * in the legal folder and has a template-like source path.
  */
 async function _upsertFromMongoDocument(doc, userId) {
   const fileName = doc.originalName || doc.name || '';
@@ -220,6 +282,7 @@ async function _upsertFromMongoDocument(doc, userId) {
     sourcePath: doc.legalFolderPath,
     sourceFolder: folderLabel,
     sourceType: 'DISCOVERED',
+    sourceKind: 'LEGAL_FOLDER_SYNC',
     documentId: doc._id,
     filename: doc.filename,
     path: doc.path,
@@ -246,16 +309,10 @@ async function _upsertFromMongoDocument(doc, userId) {
 }
 
 /**
- * Recursively scans a backend disk directory for supported template files.
- * Only creates Template records for files not already tracked.
- *
- * @param {string} dirPath
- * @param {'UPLOADED'|'DISCOVERED'} sourceType
- * @param {object} summary
- * @param {Set<string>} seen
- * @param {string|undefined} userId
+ * Recursively scans a backend disk directory. Files here are SERVER_UPLOAD
+ * records — they have real server-side paths and are not tied to a Legal Folder.
  */
-async function _scanDiskDirectory(dirPath, sourceType, summary, seen, userId) {
+async function _scanDiskDirectory(dirPath, summary, seen, userId) {
   if (!fs.existsSync(dirPath)) return;
 
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
@@ -264,7 +321,7 @@ async function _scanDiskDirectory(dirPath, sourceType, summary, seen, userId) {
     const entryPath = path.join(dirPath, entry.name);
 
     if (entry.isDirectory()) {
-      await _scanDiskDirectory(entryPath, sourceType, summary, seen, userId);
+      await _scanDiskDirectory(entryPath, summary, seen, userId);
       continue;
     }
 
@@ -283,7 +340,10 @@ async function _scanDiskDirectory(dirPath, sourceType, summary, seen, userId) {
     try {
       const existing = await Template.findOne({ path: entryPath });
       if (existing) {
-        await Template.updateOne({ _id: existing._id }, { $set: { lastScannedAt: new Date() } });
+        await Template.updateOne(
+          { _id: existing._id },
+          { $set: { lastScannedAt: new Date(), sourceKind: 'SERVER_UPLOAD' } }
+        );
         summary.updated++;
         continue;
       }
@@ -303,7 +363,8 @@ async function _scanDiskDirectory(dirPath, sourceType, summary, seen, userId) {
         filePath: entryPath,
         sourcePath: dirPath,
         sourceFolder: folderLabel,
-        sourceType,
+        sourceType: 'UPLOADED',
+        sourceKind: 'SERVER_UPLOAD',
         extension: ext,
         fileType: _normaliseFileType(ext),
         fileSize: stats.size,
@@ -315,8 +376,8 @@ async function _scanDiskDirectory(dirPath, sourceType, summary, seen, userId) {
         classificationSignals: classification.signals,
         status: 'ACTIVE',
         approvalStatus: 'APPROVED',
-        isDiscovered: sourceType === 'DISCOVERED',
-        isUploaded: sourceType === 'UPLOADED',
+        isDiscovered: false,
+        isUploaded: true,
         isActive: true,
         lastScannedAt: new Date(),
         createdBy: userId,
@@ -343,10 +404,7 @@ function _extractFolderLabel(sourcePath) {
     .split('/')
     .map((p) => p.trim())
     .filter(Boolean);
-  // Return the parent folder segment(s) — last two meaningful parts excluding the filename
-  // (sourcePath may or may not include the filename)
-  const meaningful = parts.slice(-2);
-  return meaningful.join(' / ') || null;
+  return parts.slice(-2).join(' / ') || null;
 }
 
 function _normaliseFileType(ext, mimetype) {
@@ -355,4 +413,4 @@ function _normaliseFileType(ext, mimetype) {
   return allowed.includes(ext) ? ext : 'docx';
 }
 
-module.exports = { discoverTemplates };
+module.exports = { discoverTemplates, computeSourceKey };

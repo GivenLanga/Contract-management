@@ -129,9 +129,43 @@ export const templates = {
   facets: () => request('/templates/facets'),
   upload: (formData) => uploadRequest('/templates', formData),
   uploadLegacy: (formData) => uploadRequest('/templates/upload', formData),
-  discover: (candidates = []) => request('/templates/discover', { method: 'POST', body: JSON.stringify({ candidates }) }),
+  discover: (candidates = [], legalFolderSource = null) => request('/templates/discover', { method: 'POST', body: JSON.stringify({ candidates, legalFolderSource }) }),
+  disconnectSource: (legalFolderSourceId) => request('/templates/disconnect-source', { method: 'POST', body: JSON.stringify({ legalFolderSourceId }) }),
   diagnostics: () => request('/templates/diagnostics'),
   draft: (id, data) => request(`/templates/${id}/draft`, { method: 'POST', body: JSON.stringify(data) }),
+  // createDraft handles 409 TEMPLATE_FILE_UNAVAILABLE as a typed error so the
+  // frontend can show a specific "file not available" state without losing the code.
+  createDraft: async (templateId, payload) => {
+    const token = getToken();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${BASE_URL}/templates/${encodeURIComponent(templateId)}/draft`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+
+    if (res.status === 401) {
+      localStorage.removeItem('clm_token');
+      localStorage.removeItem('clm_user');
+      window.location.href = '/login';
+      return;
+    }
+
+    const data = await res.json().catch(() => ({ error: 'Invalid server response' }));
+
+    if (res.status === 409) {
+      const err = new Error(data.message || 'Template file unavailable for drafting.');
+      err.code = data.code;
+      err.status = 409;
+      err.actions = data.actions;
+      throw err;
+    }
+
+    if (!res.ok) throw new Error(data.error || 'Failed to create draft.');
+    return data;
+  },
   downloadUrl: (id) => `${BASE_URL}/templates/${id}/download?token=${getToken()}`,
   delete: (id) => request(`/templates/${id}`, { method: 'DELETE' }),
 };
