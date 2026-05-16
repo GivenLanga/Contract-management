@@ -126,7 +126,11 @@ export const documents = {
 export const templates = {
   list: (params = {}) => request(`/templates?${new URLSearchParams(params)}`),
   get: (id) => request(`/templates/${id}`),
-  upload: (formData) => uploadRequest('/templates/upload', formData),
+  facets: () => request('/templates/facets'),
+  upload: (formData) => uploadRequest('/templates', formData),
+  uploadLegacy: (formData) => uploadRequest('/templates/upload', formData),
+  discover: (candidates = []) => request('/templates/discover', { method: 'POST', body: JSON.stringify({ candidates }) }),
+  diagnostics: () => request('/templates/diagnostics'),
   draft: (id, data) => request(`/templates/${id}/draft`, { method: 'POST', body: JSON.stringify(data) }),
   downloadUrl: (id) => `${BASE_URL}/templates/${id}/download?token=${getToken()}`,
   delete: (id) => request(`/templates/${id}`, { method: 'DELETE' }),
