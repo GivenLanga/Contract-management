@@ -159,6 +159,33 @@ function navigateTo(path, state) {
   window.dispatchEvent(new CustomEvent('navigate', { detail: { path, state } }));
 }
 
+function getOpenDraftBridgeState() {
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.contractiq);
+  const hasOpenDraftBridge =
+    typeof window !== 'undefined' && typeof window.contractiq?.openDraft === 'function';
+  return { isDesktop, hasOpenDraftBridge };
+}
+
+function buildOpenDraftDebugPayload(createdDraft) {
+  const bridge = getOpenDraftBridgeState();
+  return {
+    fileName: createdDraft?.fileName || null,
+    relativePath: createdDraft?.relativePath || null,
+    displayPath: createdDraft?.displayPath || null,
+    legalFolderSourceId: createdDraft?.legalFolderSourceId || null,
+    hasNativePath: Boolean(createdDraft?.nativePath),
+    nativePath: createdDraft?.nativePath || null,
+    hasFileHandle: Boolean(createdDraft?.fileHandle),
+    isDesktop: bridge.isDesktop,
+    hasOpenDraftBridge: bridge.hasOpenDraftBridge,
+  };
+}
+
+function missingOpenDraftFields(createdDraft) {
+  return ['fileName', 'relativePath', 'displayPath', 'legalFolderSourceId']
+    .filter((field) => !createdDraft?.[field]);
+}
+
 // ── Countdown progress ring ────────────────────────────────────────────────────
 
 function CountdownRing({ countdown, total = 5, size = 18, strokeWidth = 2.5 }) {
@@ -229,6 +256,10 @@ function DraftModal({ template, onClose, onCreated }) {
   const [openStatus, setOpenStatus] = useState(null); // null | 'opening' | 'success' | 'failed'
   const [openResult, setOpenResult] = useState(null);
   const [copyFeedback, setCopyFeedback] = useState(false);
+  const [isChoosingLegalFolder, setIsChoosingLegalFolder] = useState(false);
+  const successRenderLoggedRef = useRef(null);
+  const countdownStartedRef = useRef(false);
+  const countdownZeroLoggedRef = useRef(false);
 
   const setPhValue = useCallback((key, val) => {
     setPhValues((prev) => ({ ...prev, [key]: val }));
@@ -336,8 +367,12 @@ function DraftModal({ template, onClose, onCreated }) {
 
   // ── Open Draft handlers ─────────────────────────────────────────────────────
 
-  const handleOpenDraft = useCallback(async () => {
+  const handleOpenDraft = useCallback(async (trigger = 'manual') => {
     if (openStatus === 'opening' || !draftResult) return;
+    console.info('[Draft Created modal] handleOpenDraft starts', {
+      trigger,
+      ...buildOpenDraftDebugPayload(draftResult),
+    });
     setAutoOpenEnabled(false);
     setOpenStatus('opening');
     try {
@@ -349,14 +384,79 @@ function DraftModal({ template, onClose, onCreated }) {
         templateTitle: draftResult.templateTitle,
         mimeType: draftResult.mimeType,
         extension: draftResult.extension,
+        nativePath: draftResult.nativePath,
+      });
+      console.info('[Draft Created modal] handleOpenDraft finishes', {
+        trigger,
+        result,
+        ...buildOpenDraftDebugPayload(draftResult),
       });
       setOpenResult(result);
       setOpenStatus(result.ok ? 'success' : 'failed');
     } catch (err) {
-      setOpenResult({ ok: false, method: 'unsupported', message: err?.message || 'Failed to open.' });
+      const result = {
+        ok: false,
+        method: 'unsupported',
+        code: 'OPEN_DRAFT_EXCEPTION',
+        message: err?.message || 'Failed to open.',
+      };
+      console.info('[Draft Created modal] handleOpenDraft finishes', {
+        trigger,
+        result,
+        ...buildOpenDraftDebugPayload(draftResult),
+      });
+      setOpenResult(result);
       setOpenStatus('failed');
     }
   }, [draftResult, openStatus]);
+
+  const handleManualOpenDraftClick = useCallback(() => {
+    console.info('[Draft Created modal] user clicks Open Draft', buildOpenDraftDebugPayload(draftResult));
+    handleOpenDraft('manual');
+  }, [draftResult, handleOpenDraft]);
+
+  const handleChooseLegalFolder = useCallback(async () => {
+    console.info('[Draft Created modal] user clicks Choose Legal Folder', buildOpenDraftDebugPayload(draftResult));
+    setAutoOpenEnabled(false);
+
+    if (typeof window === 'undefined' || typeof window.contractiq?.chooseLegalFolder !== 'function') {
+      setOpenResult({
+        ok: false,
+        method: 'native_bridge',
+        code: 'DESKTOP_BRIDGE_UNAVAILABLE',
+        message: 'ContractIQ Desktop is not available to choose the Legal Folder.',
+      });
+      setOpenStatus('failed');
+      return;
+    }
+
+    setIsChoosingLegalFolder(true);
+    try {
+      const result = await window.contractiq.chooseLegalFolder();
+      console.info('[Draft Created modal] chooseLegalFolder result', result);
+      if (!result?.ok) {
+        setOpenResult({
+          ok: false,
+          method: 'native_bridge',
+          code: result?.code || 'LEGAL_FOLDER_ROOT_NOT_SET',
+          message: result?.message || 'Legal Folder selection was cancelled.',
+        });
+        setOpenStatus('failed');
+        return;
+      }
+      await handleOpenDraft('chooseLegalFolder');
+    } catch (err) {
+      setOpenResult({
+        ok: false,
+        method: 'native_bridge',
+        code: 'CHOOSE_LEGAL_FOLDER_FAILED',
+        message: err?.message || 'Could not choose the Legal Folder.',
+      });
+      setOpenStatus('failed');
+    } finally {
+      setIsChoosingLegalFolder(false);
+    }
+  }, [draftResult, handleOpenDraft]);
 
   const handleCloseDone = useCallback(() => {
     setAutoOpenEnabled(false);
@@ -374,17 +474,54 @@ function DraftModal({ template, onClose, onCreated }) {
     }
   }, [draftResult]);
 
+  useEffect(() => {
+    if (phase !== 'done' || !draftResult) return;
+    const renderKey = `${draftResult.relativePath || ''}:${draftResult.fileName || ''}`;
+    if (successRenderLoggedRef.current !== renderKey) {
+      successRenderLoggedRef.current = renderKey;
+      console.info('[Draft Created modal] modal success state renders', buildOpenDraftDebugPayload(draftResult));
+      const missing = missingOpenDraftFields(draftResult);
+      if (missing.length > 0) {
+        console.warn('[Draft Created modal] createdDraft payload is missing fields', {
+          missing,
+          ...buildOpenDraftDebugPayload(draftResult),
+        });
+      }
+    }
+
+    if (autoOpenEnabled && countdown > 0 && !countdownStartedRef.current) {
+      countdownStartedRef.current = true;
+      countdownZeroLoggedRef.current = false;
+      console.info('[Draft Created modal] countdown starts', {
+        countdown,
+        ...buildOpenDraftDebugPayload(draftResult),
+      });
+    }
+  }, [phase, draftResult, autoOpenEnabled, countdown]);
+
+  useEffect(() => {
+    if (phase !== 'done') {
+      successRenderLoggedRef.current = null;
+      countdownStartedRef.current = false;
+      countdownZeroLoggedRef.current = false;
+    }
+  }, [phase]);
+
   // Countdown auto-open: decrements every 1s and calls handleOpenDraft at zero.
   // Clears itself when autoOpenEnabled becomes false (Close clicked or manual open).
   useEffect(() => {
     if (phase !== 'done' || !autoOpenEnabled) return;
     if (countdown <= 0) {
-      handleOpenDraft();
+      if (!countdownZeroLoggedRef.current) {
+        countdownZeroLoggedRef.current = true;
+        console.info('[Draft Created modal] countdown reaches zero', buildOpenDraftDebugPayload(draftResult));
+      }
+      handleOpenDraft('countdown');
       return;
     }
     const timer = setTimeout(() => setCountdown((c) => c - 1), 1000);
     return () => clearTimeout(timer);
-  }, [phase, countdown, autoOpenEnabled, handleOpenDraft]);
+  }, [phase, countdown, autoOpenEnabled, handleOpenDraft, draftResult]);
 
   // ── Submit handler ──────────────────────────────────────────────────────────
   const handleSubmit = async (e) => {
@@ -469,6 +606,7 @@ function DraftModal({ template, onClose, onCreated }) {
         mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
         extension: 'docx',
         templateTitle: template.title || template.name,
+        nativePath: null,
         warnings,
       });
       setCountdown(5);
@@ -625,8 +763,14 @@ function DraftModal({ template, onClose, onCreated }) {
   }
 
   if (phase === 'done' && draftResult) {
-    const isBrowserFallback = openStatus === 'failed' && openResult?.method === 'browser_fallback';
-    const isOtherError = openStatus === 'failed' && !isBrowserFallback;
+    const bridgeState = getOpenDraftBridgeState();
+    const isRootNotSet = openStatus === 'failed' && openResult?.code === 'LEGAL_FOLDER_ROOT_NOT_SET';
+    const isBrowserFallback =
+      openStatus === 'failed' &&
+      openResult?.method === 'browser_fallback' &&
+      !bridgeState.isDesktop;
+    const isOtherError = openStatus === 'failed' && !isBrowserFallback && !isRootNotSet;
+    const openDebug = buildOpenDraftDebugPayload(draftResult);
 
     return (
       <Modal isOpen onClose={handleCloseDone} title="Draft Created" size="md">
@@ -653,7 +797,9 @@ function DraftModal({ template, onClose, onCreated }) {
           )}
 
           {openStatus === 'success' && (
-            <p className="templates__open-status templates__open-status--ok">Opening draft…</p>
+            <p className="templates__open-status templates__open-status--ok">
+              {openResult?.app ? `Opening in ${openResult.app}…` : 'Opening draft…'}
+            </p>
           )}
 
           {isBrowserFallback && (
@@ -684,41 +830,90 @@ function DraftModal({ template, onClose, onCreated }) {
             </div>
           )}
 
+          {isRootNotSet && (
+            <div className="templates__open-fallback templates__open-fallback--root-required">
+              <p>
+                ContractIQ Desktop needs to know your Legal Folder location before it can open the draft.
+              </p>
+              <div className="templates__open-fallback-actions">
+                <button
+                  className="templates__btn templates__btn--primary"
+                  onClick={handleChooseLegalFolder}
+                  disabled={isChoosingLegalFolder || openStatus === 'opening'}
+                  data-testid="choose-legal-folder-btn"
+                >
+                  {isChoosingLegalFolder ? 'Choosing…' : 'Choose Legal Folder'}
+                </button>
+                <button
+                  className="templates__btn templates__btn--secondary"
+                  onClick={handleManualOpenDraftClick}
+                  disabled={openStatus === 'opening' || isChoosingLegalFolder}
+                  data-testid="open-draft-again-btn"
+                >
+                  Open Draft Again
+                </button>
+                <button
+                  className="templates__btn templates__btn--secondary"
+                  onClick={handleCloseDone}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          )}
+
           {isOtherError && (
             <p className="templates__error-inline" style={{ textAlign: 'center' }}>
               {openResult?.message || "Couldn't open the file automatically."}
             </p>
           )}
 
-          <div className="templates__use-actions">
-            <button
-              className="templates__btn templates__btn--secondary"
-              onClick={handleCloseDone}
-            >
-              Close
-            </button>
-            {openStatus !== 'success' && (
+          {import.meta.env.DEV && (
+            <details className="templates__open-debug">
+              <summary>Open Draft Debug</summary>
+              <dl>
+                <div><dt>isDesktop</dt><dd>{String(openDebug.isDesktop)}</dd></div>
+                <div><dt>hasOpenDraftBridge</dt><dd>{String(openDebug.hasOpenDraftBridge)}</dd></div>
+                <div><dt>relativePath present</dt><dd>{String(Boolean(openDebug.relativePath))}</dd></div>
+                <div><dt>legalFolderSourceId</dt><dd>{openDebug.legalFolderSourceId || 'missing'}</dd></div>
+                <div><dt>nativePath present</dt><dd>{String(openDebug.hasNativePath)}</dd></div>
+                <div><dt>last open result code</dt><dd>{openResult?.code || openResult?.error || openResult?.method || 'none'}</dd></div>
+                <div><dt>last open message</dt><dd>{openResult?.message || 'none'}</dd></div>
+              </dl>
+            </details>
+          )}
+
+          {!isRootNotSet && (
+            <div className="templates__use-actions">
               <button
-                className="templates__btn templates__btn--primary templates__open-btn"
-                onClick={handleOpenDraft}
-                disabled={openStatus === 'opening'}
-                data-testid="open-draft-btn"
+                className="templates__btn templates__btn--secondary"
+                onClick={handleCloseDone}
               >
-                {openStatus === 'opening' ? (
-                  'Opening…'
-                ) : (
-                  <>
-                    {autoOpenEnabled && countdown > 0 && (
-                      <CountdownRing countdown={countdown} />
-                    )}
-                    {autoOpenEnabled && countdown > 0
-                      ? `Open Draft in ${countdown}s`
-                      : 'Open Draft'}
-                  </>
-                )}
+                Close
               </button>
-            )}
-          </div>
+              {openStatus !== 'success' && (
+                <button
+                  className="templates__btn templates__btn--primary templates__open-btn"
+                  onClick={handleManualOpenDraftClick}
+                  disabled={openStatus === 'opening'}
+                  data-testid="open-draft-btn"
+                >
+                  {openStatus === 'opening' ? (
+                    'Opening…'
+                  ) : (
+                    <>
+                      {autoOpenEnabled && countdown > 0 && (
+                        <CountdownRing countdown={countdown} />
+                      )}
+                      {autoOpenEnabled && countdown > 0
+                        ? `Open Draft in ${countdown}s`
+                        : 'Open Draft'}
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </Modal>
     );

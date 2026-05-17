@@ -157,7 +157,12 @@ function setupIndexWithTemplates() {
   });
 }
 
+let templateInfoSpy;
+let templateWarnSpy;
+
 beforeEach(() => {
+  templateInfoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+  templateWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.clearAllMocks();
   getLegalFolderImport.mockReturnValue({ source: null, contracts: [], documents: [] });
   getLegalFolderStatus.mockResolvedValue(statusFor(FOLDER_STATE.DISCONNECTED));
@@ -169,8 +174,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  templateInfoSpy.mockRestore();
+  templateWarnSpy.mockRestore();
   delete window.showSaveFilePicker;
   delete window.showDirectoryPicker;
+  delete window.contractiq;
 });
 
 // ── 1. Templates visible with index-only state ────────────────────────────────
@@ -322,7 +330,6 @@ describe('DraftModal — WRITE_READY', () => {
     setupIndexWithTemplates();
     getLegalFolderStatus.mockResolvedValue(statusFor(FOLDER_STATE.WRITE_READY));
     getLegalFolderFile.mockResolvedValue({ blob: new Blob(['docx']), type: 'docx' });
-    const handle = { name: 'Drafts', kind: 'directory' };
     getLegalFolderHandle.mockReturnValue({ name: 'Legal Folder' });
 
     renderTemplates();
@@ -640,7 +647,6 @@ describe('Draft Created modal — countdown decrement', () => {
     // Each round of `act(async () => Promise.resolve())` flushes one microtask layer.
     const flush = async (rounds = 8) => {
       for (let i = 0; i < rounds; i++) {
-        // eslint-disable-next-line no-await-in-loop
         await act(async () => { await Promise.resolve(); });
       }
     };
@@ -779,6 +785,90 @@ describe('Draft Created modal — browser_fallback shown on open failure', () =>
       extension: 'docx',
       mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     });
+  });
+
+  it('does not show browser-only fallback text when the Electron bridge exists', async () => {
+    window.contractiq = {
+      openDraft: vi.fn(),
+      chooseLegalFolder: vi.fn(),
+    };
+    openDraft.mockResolvedValue({
+      ok: false,
+      method: 'browser_fallback',
+      code: 'DESKTOP_OPEN_FAILED',
+      message: 'Desktop bridge returned an open error.',
+    });
+    setupForSuccess();
+    await reachDoneState();
+    fireEvent.click(screen.getByTestId('open-draft-btn'));
+
+    await waitFor(() => {
+      expect(screen.getAllByText('Desktop bridge returned an open error.').length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByText(/Automatic opening requires the ContractIQ desktop app/)).not.toBeInTheDocument();
+  });
+});
+
+describe('Draft Created modal — Legal Folder root selection', () => {
+  it('shows Choose Legal Folder action when Electron reports LEGAL_FOLDER_ROOT_NOT_SET', async () => {
+    window.contractiq = {
+      openDraft: vi.fn(),
+      chooseLegalFolder: vi.fn(),
+    };
+    openDraft.mockResolvedValue({
+      ok: false,
+      method: 'native_bridge',
+      code: 'LEGAL_FOLDER_ROOT_NOT_SET',
+      message: 'ContractIQ Desktop needs to know your Legal Folder location before it can open the draft.',
+    });
+    setupForSuccess();
+    await reachDoneState();
+    fireEvent.click(screen.getByTestId('open-draft-btn'));
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/needs to know your Legal Folder location/).length).toBeGreaterThan(0);
+    });
+    expect(screen.getByTestId('choose-legal-folder-btn')).toBeInTheDocument();
+    expect(screen.getByTestId('open-draft-again-btn')).toBeInTheDocument();
+    expect(screen.queryByText(/Automatic opening requires the ContractIQ desktop app/)).not.toBeInTheDocument();
+  });
+
+  it('chooses the Legal Folder and retries Open Draft automatically', async () => {
+    window.contractiq = {
+      openDraft: vi.fn(),
+      chooseLegalFolder: vi.fn().mockResolvedValue({
+        ok: true,
+        name: 'sa_mock_contracts_pack',
+        sourceId: 'legal-folder:test',
+        rootName: 'sa_mock_contracts_pack',
+      }),
+    };
+    openDraft
+      .mockResolvedValueOnce({
+        ok: false,
+        method: 'native_bridge',
+        code: 'LEGAL_FOLDER_ROOT_NOT_SET',
+        message: 'ContractIQ Desktop needs to know your Legal Folder location before it can open the draft.',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        method: 'libreoffice_writer',
+        app: 'LibreOffice Writer',
+        message: 'Opening in LibreOffice Writer.',
+      });
+
+    setupForSuccess();
+    await reachDoneState();
+    fireEvent.click(screen.getByTestId('open-draft-btn'));
+    await waitFor(() => screen.getByTestId('choose-legal-folder-btn'));
+
+    fireEvent.click(screen.getByTestId('choose-legal-folder-btn'));
+
+    await waitFor(() => {
+      expect(window.contractiq.chooseLegalFolder).toHaveBeenCalledTimes(1);
+      expect(openDraft).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getAllByText(/Opening in LibreOffice Writer/).length).toBeGreaterThan(0);
   });
 });
 

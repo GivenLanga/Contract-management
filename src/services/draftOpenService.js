@@ -14,13 +14,29 @@ function normalizeExt(ext) {
   return String(ext || '').toLowerCase().replace(/^\./, '');
 }
 
+function getDesktopBridgeState() {
+  const hasContractiq = typeof window !== 'undefined' && Boolean(window.contractiq);
+  const hasOpenDraftBridge =
+    typeof window !== 'undefined' && typeof window.contractiq?.openDraft === 'function';
+  return { hasContractiq, hasOpenDraftBridge };
+}
+
+function isUnsupportedBridgeResult(result) {
+  return (
+    result?.method === 'unsupported' ||
+    result?.code === 'UNSUPPORTED' ||
+    result?.code === 'UNSUPPORTED_DESKTOP_BRIDGE'
+  );
+}
+
 function validate({ relativePath, extension }) {
   if (!relativePath) {
     return {
       ok: false,
       method: 'unsupported',
       message: 'Missing file path — cannot open draft.',
-      error: 'MISSING_PATH',
+      code: 'MISSING_RELATIVE_PATH',
+      error: 'MISSING_RELATIVE_PATH',
     };
   }
   if (!ALLOWED_EXTENSIONS.has(normalizeExt(extension))) {
@@ -28,7 +44,8 @@ function validate({ relativePath, extension }) {
       ok: false,
       method: 'unsupported',
       message: `File type "${normalizeExt(extension) || 'unknown'}" is not supported for opening.`,
-      error: 'INVALID_EXTENSION',
+      code: 'UNSUPPORTED_EXTENSION',
+      error: 'UNSUPPORTED_EXTENSION',
     };
   }
   return null;
@@ -53,42 +70,83 @@ function validate({ relativePath, extension }) {
  *
  * @returns {Promise<{
  *   ok: boolean,
- *   method: 'native_bridge_word' | 'native_bridge_default' | 'custom_protocol' | 'browser_fallback' | 'unsupported',
+ *   method: 'native_bridge' | 'custom_protocol' | 'browser_fallback' | 'unsupported',
  *   message: string,
+ *   code?: string,
  *   error?: string,
  * }>}
  */
 export async function openDraft(createdDraft) {
-  const { relativePath, extension, legalFolderSourceId } = createdDraft || {};
+  const { relativePath, extension, legalFolderSourceId, nativePath } = createdDraft || {};
 
   const invalid = validate({ relativePath, extension });
   if (invalid) return invalid;
 
   // 1. Native bridge (Electron / Tauri / local helper exposes window.contractiq)
-  if (typeof window !== 'undefined' && typeof window.contractiq?.openDraft === 'function') {
+  const bridgeState = getDesktopBridgeState();
+  console.info('[draftOpenService] desktop bridge available', bridgeState);
+
+  if (bridgeState.hasOpenDraftBridge) {
     try {
-      const wordResult = await window.contractiq.openDraft({
+      const payload = {
         relativePath,
         legalFolderSourceId,
         preferredApp: 'word',
-      });
-      if (wordResult?.ok) {
-        return { ok: true, method: 'native_bridge_word', message: 'Opening in Microsoft Word…' };
-      }
-      const defaultResult = await window.contractiq.openDraft({
-        relativePath,
-        legalFolderSourceId,
-        preferredApp: 'default',
-      });
-      if (defaultResult?.ok) {
+      };
+      if (nativePath) payload.nativePath = nativePath;
+
+      console.info('[draftOpenService] calling openDraft', payload);
+      const result = await window.contractiq.openDraft(payload);
+      console.info('[draftOpenService] openDraft result', result);
+
+      if (result?.ok) {
+        const app = result.app || 'your document editor';
         return {
           ok: true,
-          method: 'native_bridge_default',
-          message: 'Opening in your default document editor…',
+          method: result.method || 'native_bridge',
+          message: result.message || `Opening in ${app}…`,
+          app,
         };
       }
-    } catch {
-      // Bridge call failed — fall through
+
+      if (!isUnsupportedBridgeResult(result)) {
+        return {
+          ok: false,
+          method: result?.method || 'native_bridge',
+          code: result?.code || result?.error || 'DESKTOP_OPEN_FAILED',
+          error: result?.code || result?.error || 'DESKTOP_OPEN_FAILED',
+          message: result?.message || 'ContractIQ Desktop could not open the draft.',
+          app: result?.app,
+        };
+      }
+
+      console.warn('[draftOpenService] fallback', {
+        reason: 'desktop_bridge_returned_unsupported',
+        result,
+      });
+    } catch (err) {
+      const result = {
+        ok: false,
+        method: 'native_bridge',
+        code: 'DESKTOP_BRIDGE_ERROR',
+        error: 'DESKTOP_BRIDGE_ERROR',
+        message: err?.message || 'ContractIQ Desktop bridge failed while opening the draft.',
+      };
+      console.info('[draftOpenService] openDraft result', result);
+      return result;
+    }
+  } else {
+    console.warn('[draftOpenService] fallback', {
+      reason: bridgeState.hasContractiq ? 'openDraft_bridge_missing' : 'contractiq_bridge_missing',
+    });
+    if (bridgeState.hasContractiq) {
+      return {
+        ok: false,
+        method: 'native_bridge',
+        code: 'DESKTOP_OPEN_BRIDGE_MISSING',
+        error: 'DESKTOP_OPEN_BRIDGE_MISSING',
+        message: 'ContractIQ Desktop is running, but the Open Draft bridge is not available.',
+      };
     }
   }
 
@@ -105,15 +163,24 @@ export async function openDraft(createdDraft) {
         `&token=${encodeURIComponent(token)}`;
       window.location.href = url;
       return { ok: true, method: 'custom_protocol', message: 'Opening via ContractIQ protocol handler…' };
-    } catch {
+    } catch (err) {
+      console.warn('[draftOpenService] fallback', {
+        reason: 'custom_protocol_failed',
+        message: err?.message || String(err),
+      });
       // Protocol handler not available — fall through
     }
   }
 
   // 3. Browser-only fallback — honest: cannot auto-open from a web page
+  console.warn('[draftOpenService] fallback', {
+    reason: 'browser_only_no_open_capability',
+  });
   return {
     ok: false,
     method: 'browser_fallback',
+    code: 'BROWSER_OPEN_UNSUPPORTED',
+    error: 'BROWSER_OPEN_UNSUPPORTED',
     message:
       'Automatic opening requires the ContractIQ desktop app. ' +
       'The draft was created successfully. Open it from the Legal Folder path shown.',

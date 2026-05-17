@@ -12,8 +12,9 @@ import {
 import { collectSigningClientEvidence } from '../../services/signingEvidenceClient';
 import { normalizeSignatureCanvas, normalizeSignatureDataUrl } from './signatureImageUtils';
 import './ExternalSigningPage.css';
+import { getApiBaseUrl } from '../../services/apiBase';
 
-const BASE_URL = import.meta.env.VITE_API_URL || '/api';
+const BASE_URL = getApiBaseUrl();
 const MAX_SIGNATURE_IMAGE_BYTES = 2 * 1024 * 1024;
 const DRAWN_SIGNATURE_MIN_POINTS = 8;
 const ACCEPTED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg']);

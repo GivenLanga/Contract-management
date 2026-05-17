@@ -14,8 +14,12 @@ const VALID = {
 };
 
 let savedLocationHref;
+let infoSpy;
+let warnSpy;
 
 beforeEach(() => {
+  infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+  warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   delete window.contractiq;
   delete window.__contractiq_protocol_base;
   delete window.__contractiq_open_token;
@@ -24,6 +28,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  infoSpy.mockRestore();
+  warnSpy.mockRestore();
   delete window.contractiq;
   delete window.__contractiq_protocol_base;
   delete window.__contractiq_open_token;
@@ -37,41 +43,41 @@ describe('Input validation', () => {
     const result = await openDraft({ ...VALID, relativePath: '' });
     expect(result.ok).toBe(false);
     expect(result.method).toBe('unsupported');
-    expect(result.error).toBe('MISSING_PATH');
+    expect(result.error).toBe('MISSING_RELATIVE_PATH');
   });
 
   it('rejects null relativePath', async () => {
     const result = await openDraft({ ...VALID, relativePath: null });
     expect(result.ok).toBe(false);
-    expect(result.error).toBe('MISSING_PATH');
+    expect(result.error).toBe('MISSING_RELATIVE_PATH');
   });
 
   it('rejects invalid extension .exe', async () => {
     const result = await openDraft({ ...VALID, extension: 'exe' });
     expect(result.ok).toBe(false);
     expect(result.method).toBe('unsupported');
-    expect(result.error).toBe('INVALID_EXTENSION');
+    expect(result.error).toBe('UNSUPPORTED_EXTENSION');
   });
 
   it('rejects invalid extension .pdf', async () => {
     const result = await openDraft({ ...VALID, extension: 'pdf' });
     expect(result.ok).toBe(false);
-    expect(result.error).toBe('INVALID_EXTENSION');
+    expect(result.error).toBe('UNSUPPORTED_EXTENSION');
   });
 
   it('accepts .docx extension', async () => {
     const result = await openDraft(VALID);
-    expect(result.error).toBeUndefined();
+    expect(result.method).toBe('browser_fallback');
   });
 
   it('accepts .doc extension', async () => {
     const result = await openDraft({ ...VALID, extension: 'doc' });
-    expect(result.error).toBeUndefined();
+    expect(result.method).toBe('browser_fallback');
   });
 
   it('accepts .dotx extension', async () => {
     const result = await openDraft({ ...VALID, extension: 'dotx' });
-    expect(result.error).toBeUndefined();
+    expect(result.method).toBe('browser_fallback');
   });
 });
 
@@ -96,50 +102,107 @@ describe('browser_fallback — no native bridge', () => {
 // ── Native bridge ─────────────────────────────────────────────────────────────
 
 describe('native_bridge — window.contractiq', () => {
-  it('returns native_bridge_word when bridge succeeds with word', async () => {
+  it('logs and calls bridge when window.contractiq exists', async () => {
     window.contractiq = {
-      openDraft: vi.fn().mockResolvedValue({ ok: true }),
+      openDraft: vi.fn().mockResolvedValue({
+        ok: true,
+        app: 'LibreOffice Writer',
+        method: 'libreoffice_writer',
+        message: 'Opening in LibreOffice Writer.',
+      }),
     };
     const result = await openDraft(VALID);
     expect(result.ok).toBe(true);
-    expect(result.method).toBe('native_bridge_word');
+    expect(result.method).toBe('libreoffice_writer');
     expect(window.contractiq.openDraft).toHaveBeenCalledWith({
       relativePath: VALID.relativePath,
       legalFolderSourceId: VALID.legalFolderSourceId,
       preferredApp: 'word',
     });
+    expect(infoSpy).toHaveBeenCalledWith(
+      '[draftOpenService] desktop bridge available',
+      { hasContractiq: true, hasOpenDraftBridge: true }
+    );
+    expect(infoSpy).toHaveBeenCalledWith(
+      '[draftOpenService] calling openDraft',
+      {
+        relativePath: VALID.relativePath,
+        legalFolderSourceId: VALID.legalFolderSourceId,
+        preferredApp: 'word',
+      }
+    );
   });
 
-  it('falls back to native_bridge_default when word fails but default succeeds', async () => {
+  it('propagates app name from bridge response in message and app field', async () => {
     window.contractiq = {
-      openDraft: vi.fn()
-        .mockResolvedValueOnce({ ok: false })   // word → fail
-        .mockResolvedValueOnce({ ok: true }),    // default → success
+      openDraft: vi.fn().mockResolvedValue({ ok: true, app: 'LibreOffice Writer' }),
     };
     const result = await openDraft(VALID);
     expect(result.ok).toBe(true);
-    expect(result.method).toBe('native_bridge_default');
-    expect(window.contractiq.openDraft).toHaveBeenCalledTimes(2);
+    expect(result.app).toBe('LibreOffice Writer');
+    expect(result.message).toContain('LibreOffice Writer');
   });
 
-  it('returns browser_fallback when both word and default fail', async () => {
+  it('falls back to a generic editor label when bridge returns ok:true with no app', async () => {
     window.contractiq = {
-      openDraft: vi.fn()
-        .mockResolvedValueOnce({ ok: false })
-        .mockResolvedValueOnce({ ok: false }),
+      openDraft: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    const result = await openDraft(VALID);
+    expect(result.ok).toBe(true);
+    expect(result.app).toBe('your document editor');
+  });
+
+  it('returns the exact desktop error when the bridge fails with a known code', async () => {
+    window.contractiq = {
+      openDraft: vi.fn().mockResolvedValue({
+        ok: false,
+        code: 'LEGAL_FOLDER_ROOT_NOT_SET',
+        message: 'Choose your Legal Folder before opening drafts.',
+      }),
+    };
+    const result = await openDraft(VALID);
+    expect(result.ok).toBe(false);
+    expect(result.method).toBe('native_bridge');
+    expect(result.code).toBe('LEGAL_FOLDER_ROOT_NOT_SET');
+    expect(result.message).toContain('Legal Folder');
+    expect(window.contractiq.openDraft).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back only when the bridge explicitly returns unsupported', async () => {
+    window.contractiq = {
+      openDraft: vi.fn().mockResolvedValue({
+        ok: false,
+        method: 'unsupported',
+        code: 'UNSUPPORTED_DESKTOP_BRIDGE',
+      }),
     };
     const result = await openDraft(VALID);
     expect(result.ok).toBe(false);
     expect(result.method).toBe('browser_fallback');
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[draftOpenService] fallback',
+      expect.objectContaining({ reason: 'desktop_bridge_returned_unsupported' })
+    );
   });
 
-  it('returns browser_fallback when bridge throws', async () => {
+  it('returns DESKTOP_BRIDGE_ERROR when bridge throws', async () => {
     window.contractiq = {
       openDraft: vi.fn().mockRejectedValue(new Error('bridge crashed')),
     };
     const result = await openDraft(VALID);
     expect(result.ok).toBe(false);
-    expect(result.method).toBe('browser_fallback');
+    expect(result.method).toBe('native_bridge');
+    expect(result.code).toBe('DESKTOP_BRIDGE_ERROR');
+    expect(result.message).toBe('bridge crashed');
+  });
+
+  it('does not return browser fallback wording when contractiq exists without openDraft', async () => {
+    window.contractiq = {};
+    const result = await openDraft(VALID);
+    expect(result.ok).toBe(false);
+    expect(result.method).toBe('native_bridge');
+    expect(result.code).toBe('DESKTOP_OPEN_BRIDGE_MISSING');
+    expect(result.message).not.toMatch(/desktop app required/i);
   });
 
   it('passes relativePath and legalFolderSourceId to bridge, not absolute path', async () => {
@@ -151,6 +214,41 @@ describe('native_bridge — window.contractiq', () => {
     expect(call).not.toHaveProperty('absolutePath');
     expect(call).toHaveProperty('relativePath');
     expect(call).toHaveProperty('legalFolderSourceId');
+  });
+
+  it('does not include nativePath in bridge args when createdDraft has no nativePath', async () => {
+    window.contractiq = {
+      openDraft: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    await openDraft(VALID); // VALID has no nativePath
+    const call = window.contractiq.openDraft.mock.calls[0][0];
+    expect(call).not.toHaveProperty('nativePath');
+  });
+
+  it('includes nativePath in bridge args when createdDraft provides one', async () => {
+    window.contractiq = {
+      openDraft: vi.fn().mockResolvedValue({ ok: true, app: 'LibreOffice Writer' }),
+    };
+    const draftWithPath = {
+      ...VALID,
+      nativePath: '/home/user/Legal Folder/Contracts/2026/Services/Acme/Drafts/Agreement v1.docx',
+    };
+    await openDraft(draftWithPath);
+    const call = window.contractiq.openDraft.mock.calls[0][0];
+    expect(call.nativePath).toBe(draftWithPath.nativePath);
+    expect(call.relativePath).toBe(VALID.relativePath);
+  });
+
+  it('includes nativePath in the single bridge call when provided', async () => {
+    const nativePath = '/home/user/Legal Folder/Contracts/2026/Services/Acme/Drafts/Agreement v1.docx';
+    window.contractiq = {
+      openDraft: vi.fn().mockResolvedValue({ ok: true, app: 'LibreOffice Writer' }),
+    };
+    await openDraft({ ...VALID, nativePath });
+    const call = window.contractiq.openDraft.mock.calls[0][0];
+    expect(call.nativePath).toBe(nativePath);
+    expect(call.preferredApp).toBe('word');
+    expect(window.contractiq.openDraft).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -190,10 +288,10 @@ describe('custom_protocol — window.__contractiq_protocol_base', () => {
 
   it('custom protocol takes lower priority than native bridge', async () => {
     window.contractiq = {
-      openDraft: vi.fn().mockResolvedValue({ ok: true }),
+      openDraft: vi.fn().mockResolvedValue({ ok: true, method: 'libreoffice_writer' }),
     };
     window.__contractiq_protocol_base = 'contractiq://open-draft';
     const result = await openDraft(VALID);
-    expect(result.method).toBe('native_bridge_word');
+    expect(result.method).toBe('libreoffice_writer');
   });
 });

@@ -28,9 +28,13 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow any localhost origin in development, or the configured FRONTEND_URL
     const allowed = process.env.FRONTEND_URL || 'http://localhost:5173';
-    if (!origin || origin === allowed || /^http:\/\/localhost:\d+$/.test(origin)) {
+    if (
+      !origin ||                // no Origin header (curl, server-to-server)
+      origin === 'null' ||      // file:// pages in Electron production
+      origin === allowed ||
+      /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)
+    ) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
@@ -92,12 +96,20 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`CLM Server running on port ${PORT} [${process.env.NODE_ENV}]`);
   if ((process.env.ACTIVE_MODEL_PROVIDER || 'local') === 'local') {
     getAiRuntimeManager().initialize().catch((err) => {
       console.error(`[AI Runtime] Startup check failed: ${err.message}`);
     });
+  }
+});
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`[server] Port ${PORT} is already in use. Stop the other process or set PORT= to a different value and try again.`);
+    process.exit(1);
+  } else {
+    throw err;
   }
 });
 

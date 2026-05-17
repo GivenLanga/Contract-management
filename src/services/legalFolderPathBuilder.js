@@ -242,6 +242,7 @@ export async function writeDraftToFolder(draftsHandle, fileName, blob) {
   const writable = await fileHandle.createWritable();
   await writable.write(blob);
   await writable.close();
+  return fileHandle;
 }
 
 // ── Sync path builder (no handle required, for preview only) ──────────────────

@@ -1,4 +1,5 @@
-const BASE_URL = import.meta.env.VITE_API_URL || '/api';
+import { getApiBaseUrl } from './apiBase';
+const BASE_URL = getApiBaseUrl();
 
 const getToken = () => localStorage.getItem('clm_token');
 
@@ -7,7 +8,12 @@ const request = async (endpoint, options = {}) => {
   const headers = { 'Content-Type': 'application/json', ...options.headers };
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(`${BASE_URL}${endpoint}`, { ...options, headers });
+  const res = await fetch(`${BASE_URL}${endpoint}`, { ...options, headers }).catch((err) => {
+    throw Object.assign(
+      new Error('ContractIQ backend is not running. Start the local backend service and try again.'),
+      { cause: err }
+    );
+  });
 
   if (res.status === 401) {
     localStorage.removeItem('clm_token');
@@ -30,6 +36,11 @@ const uploadRequest = async (endpoint, formData) => {
     method: 'POST',
     headers,
     body: formData,
+  }).catch((err) => {
+    throw Object.assign(
+      new Error('ContractIQ backend is not running. Start the local backend service and try again.'),
+      { cause: err }
+    );
   });
 
   if (res.status === 401) {
@@ -56,7 +67,12 @@ const fileRequest = async (endpoint) => {
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const res = await fetch(`${BASE_URL}${endpoint}`, { headers });
+  const res = await fetch(`${BASE_URL}${endpoint}`, { headers }).catch((err) => {
+    throw Object.assign(
+      new Error('ContractIQ backend is not running. Start the local backend service and try again.'),
+      { cause: err }
+    );
+  });
 
   if (res.status === 401) {
     localStorage.removeItem('clm_token');
