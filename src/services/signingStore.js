@@ -96,14 +96,16 @@ const legalFolderDocuments = () => {
   const snapshot = getLegalFolderImport();
   const contractMap = new Map(snapshot.contracts.map((contract) => [contract.id, contract]));
 
-  return snapshot.documents.map((doc) => {
+  return snapshot.documents
+    .filter((doc) => doc.lifecycleStage === 'FINAL' || doc.lifecycleStage === 'SIGNED')
+    .map((doc) => {
     const contract = contractMap.get(doc.contract?.id) ||
       snapshot.contracts.find((item) => item.title === doc.contract?.title) ||
       null;
     const record = recordFor(doc._id);
     const fields = record?.signingFields || defaultSigningFields(doc, contract);
     const signatures = record?.signatures || [];
-    const status = record?.status || 'Ready for Signature';
+    const status = record?.status || (doc.lifecycleStage === 'SIGNED' ? 'Signed' : 'Ready for Signature');
 
     return {
       ...doc,

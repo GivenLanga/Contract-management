@@ -1,7 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { NotificationProvider } from './context/NotificationContext';
+import {
+  LEGAL_FOLDER_LIFECYCLE_NOTIFICATION,
+  subscribeToDesktopLifecycleIndex,
+  syncLifecycleIndexFromDesktop,
+} from './services/legalFolderStore';
 
 import Sidebar from './components/Layout/Sidebar';
 import Dashboard from './components/Dashboard/Dashboard';
@@ -28,16 +33,29 @@ import LegalRequestDetail from './components/LegalRequests/LegalRequestDetail';
 
 import './App.css';
 
-function ProtectedRoute({ children }) {
-  const { user, loading } = useAuth();
-  if (loading) return <div className="app-loading">Loading ContractIQ...</div>;
-  if (!user) return <Navigate to="/login" replace />;
-  return children;
-}
-
 function AppShell() {
   const { user } = useAuth();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [lifecycleToast, setLifecycleToast] = useState('');
+
+  useEffect(() => {
+    if (!user) return undefined;
+    const unsubscribe = subscribeToDesktopLifecycleIndex();
+    syncLifecycleIndexFromDesktop().catch(() => {});
+    return unsubscribe;
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return undefined;
+    const onNotification = (event) => {
+      const message = event.detail?.message;
+      if (!message) return;
+      setLifecycleToast(message);
+      setTimeout(() => setLifecycleToast(''), 5000);
+    };
+    window.addEventListener(LEGAL_FOLDER_LIFECYCLE_NOTIFICATION, onNotification);
+    return () => window.removeEventListener(LEGAL_FOLDER_LIFECYCLE_NOTIFICATION, onNotification);
+  }, [user]);
 
   if (!user) {
     return (
@@ -63,6 +81,11 @@ function AppShell() {
               onToggle={() => setSidebarCollapsed((c) => !c)}
             />
             <main className="app__main">
+              {lifecycleToast && (
+                <div className="app__lifecycle-toast" role="status">
+                  {lifecycleToast}
+                </div>
+              )}
               <Routes>
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/contracts" element={<ContractList />} />

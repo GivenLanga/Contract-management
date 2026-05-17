@@ -5,6 +5,7 @@ import {
   ResponsiveContainer, Legend, PieChart, Pie, Cell, Area, AreaChart, ReferenceLine,
 } from 'recharts';
 import { contracts as contractsApi, reports as reportsApi } from '../../services/api';
+import { getLegalFolderImport, LEGAL_FOLDER_UPDATED } from '../../services/legalFolderStore';
 import './Reports.css';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -293,6 +294,17 @@ function PriorityBadge({ value }) {
   return <span className={`reports__priority reports__priority--${(value || 'medium').toLowerCase()}`}>{value || 'Medium'}</span>;
 }
 
+function lifecycleCountsFromSnapshot(snapshot) {
+  return (snapshot.documents || []).reduce((acc, doc) => {
+    const stage = doc.lifecycleStage || 'UNKNOWN';
+    if (stage === 'TEMPLATE') acc.templates += 1;
+    else if (stage === 'DRAFT') acc.drafts += 1;
+    else if (stage === 'FINAL') acc.finals += 1;
+    else if (stage === 'SIGNED') acc.signed += 1;
+    return acc;
+  }, { templates: 0, drafts: 0, finals: 0, signed: 0 });
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function Reports() {
   // ── Data ──
@@ -301,6 +313,7 @@ export default function Reports() {
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState(null);
   const [retryKey, setRetryKey] = useState(0);
+  const [lifecycleCounts, setLifecycleCounts] = useState(() => lifecycleCountsFromSnapshot(getLegalFolderImport()));
 
   // ── Filters ──
   const [dateRange,   setDateRange]   = useState('last6m');
@@ -312,6 +325,18 @@ export default function Reports() {
   const [showComp,    setShowComp]    = useState(false);
 
   const retry = useCallback(() => { setRetryKey(k => k + 1); setError(null); }, []);
+
+  useEffect(() => {
+    const refreshLifecycleCounts = () => {
+      setLifecycleCounts(lifecycleCountsFromSnapshot(getLegalFolderImport()));
+    };
+    window.addEventListener(LEGAL_FOLDER_UPDATED, refreshLifecycleCounts);
+    window.addEventListener('storage', refreshLifecycleCounts);
+    return () => {
+      window.removeEventListener(LEGAL_FOLDER_UPDATED, refreshLifecycleCounts);
+      window.removeEventListener('storage', refreshLifecycleCounts);
+    };
+  }, []);
 
   // ── Fetch ──
   useEffect(() => {
@@ -488,6 +513,26 @@ export default function Reports() {
             Showing the most recent 2,000 contracts. Some aggregate figures may not reflect your full portfolio.
           </div>
         )}
+
+        <div className="reports__card">
+          <div className="reports__card-header">
+            <h3>Legal Folder Lifecycle</h3>
+            <span>Local index</span>
+          </div>
+          <div className="reports__exposure-row">
+            {[
+              { label: 'Templates', value: lifecycleCounts.templates, color: 'blue' },
+              { label: 'Drafts', value: lifecycleCounts.drafts, color: 'gray' },
+              { label: 'Final', value: lifecycleCounts.finals, color: 'amber' },
+              { label: 'Signed', value: lifecycleCounts.signed, color: 'green' },
+            ].map(e => (
+              <div key={e.label} className={`reports__exposure-card reports__exposure-card--${e.color}`}>
+                <div className="reports__exposure-value">{e.value}</div>
+                <div className="reports__exposure-label">{e.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
 
         {/* ── Key Insights (data-driven) ── */}
         {m.insights.length > 0 && (

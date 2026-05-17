@@ -7,6 +7,8 @@ import {
   entriesFromFileList,
   getLegalFolderImport,
   saveLegalFolderImport,
+  subscribeToDesktopLifecycleIndex,
+  syncLifecycleIndexFromDesktop,
 } from '../../services/legalFolderStore';
 import { clearLegalFolderFiles, replaceLegalFolderFiles } from '../../services/legalFolderFileStore';
 import { syncLegalFolderRagIndex } from '../../services/legalFolderRagSync';
@@ -33,6 +35,12 @@ export default function LegalFolder() {
   const [typeFilter, setTypeFilter] = useState('');
   const [writeStatus, setWriteStatus] = useState(null);
 
+  const applySnapshot = (snapshot) => {
+    setDocs(snapshot.documents || []);
+    setTotal(snapshot.documents?.length || 0);
+    setSource(snapshot.source || null);
+  };
+
   // Check write access status on mount and whenever the source changes
   useEffect(() => {
     let cancelled = false;
@@ -42,11 +50,23 @@ export default function LegalFolder() {
     return () => { cancelled = true; };
   }, [source]);
 
-  const applySnapshot = (snapshot) => {
-    setDocs(snapshot.documents || []);
-    setTotal(snapshot.documents?.length || 0);
-    setSource(snapshot.source || null);
-  };
+  useEffect(() => {
+    const unsubscribe = subscribeToDesktopLifecycleIndex();
+    syncLifecycleIndexFromDesktop()
+      .then((snapshot) => {
+        if (snapshot?.source) applySnapshot(snapshot);
+      })
+      .catch(() => {});
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => applySnapshot(getLegalFolderImport());
+    window.addEventListener('storage', refresh);
+    return () => {
+      window.removeEventListener('storage', refresh);
+    };
+  }, []);
 
   const syncEntries = async (entries, sourceName) => {
     const enrichedEntries = await enrichLegalFolderEntries(entries);
@@ -70,7 +90,24 @@ export default function LegalFolder() {
     setSyncError('');
 
     try {
-      if ('showDirectoryPicker' in window) {
+      if (typeof window.contractiq?.chooseLegalFolder === 'function') {
+        const result = await window.contractiq.chooseLegalFolder();
+        if (!result?.ok) {
+          if (result?.code !== 'SELECTION_CANCELLED') {
+            setSyncError(result?.message || 'Could not choose the Legal Folder.');
+          }
+          return;
+        }
+        const snapshot = await syncLifecycleIndexFromDesktop();
+        applySnapshot(snapshot);
+        setWriteStatus({
+          state: FOLDER_STATE.WRITE_READY,
+          hasIndex: true,
+          canRead: true,
+          canWrite: true,
+          sourceName: result.rootName || result.name,
+        });
+      } else if ('showDirectoryPicker' in window) {
         // readwrite mode enables draft write-back into the connected Legal Folder
         const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
         setLegalFolderHandle(directoryHandle);
@@ -130,6 +167,14 @@ export default function LegalFolder() {
     setSyncError('');
     setDisconnectMsg('');
 
+    if (typeof window.contractiq?.disconnectLegalFolder === 'function') {
+      try {
+        await window.contractiq.disconnectLegalFolder();
+      } catch {
+        // Local state is already cleared; desktop cleanup can be retried by reconnecting.
+      }
+    }
+
     if (sourceId) {
       try {
         await templatesApi.disconnectSource(sourceId);
@@ -149,8 +194,9 @@ export default function LegalFolder() {
   });
 
   const grouped = filtered.reduce((acc, doc) => {
-    const fullTitle = doc.contract?.title || 'Uncategorized';
-    const group = fullTitle.split(' - ')[0].trim() || 'Uncategorized';
+    const stage = doc.lifecycleStage || doc.documentStage || 'UNKNOWN';
+    const category = doc.category || doc.stageFolder || doc.contract?.title?.split(' - ')[0]?.trim() || 'Uncategorized';
+    const group = `${stage} · ${category}`;
     if (!acc[group]) acc[group] = [];
     acc[group].push(doc);
     return acc;
@@ -177,6 +223,14 @@ export default function LegalFolder() {
   };
 
   const wsLabel = writeStatusLabel();
+  const lifecycleSummary = source?.lifecycleSummary || {};
+  const stageLabel = (stage) => {
+    if (stage === 'TEMPLATE') return 'Template';
+    if (stage === 'DRAFT') return 'Draft';
+    if (stage === 'FINAL') return 'Final';
+    if (stage === 'SIGNED') return 'Signed';
+    return 'Unknown';
+  };
 
   return (
     <div className="legal-folder">
@@ -239,6 +293,10 @@ export default function LegalFolder() {
               {source.skippedFileCount > 0 && (
                 <span>{source.skippedFileCount} skipped</span>
               )}
+              <span>{lifecycleSummary.templates || 0} template{(lifecycleSummary.templates || 0) !== 1 ? 's' : ''}</span>
+              <span>{lifecycleSummary.drafts || 0} draft{(lifecycleSummary.drafts || 0) !== 1 ? 's' : ''}</span>
+              <span>{lifecycleSummary.finals || 0} final</span>
+              <span>{lifecycleSummary.signed || 0} signed</span>
               <span>Last sync {new Date(source.syncedAt).toLocaleString()}</span>
               {wsLabel && (
                 <span style={{ color: wsLabel.color, fontWeight: 600 }}>
@@ -308,7 +366,11 @@ export default function LegalFolder() {
                     </div>
 
                     <div className="legal-doc-chips">
+                      <span className={`legal-doc-chip legal-doc-chip--stage legal-doc-chip--stage-${String(doc.lifecycleStage || 'UNKNOWN').toLowerCase()}`}>
+                        {stageLabel(doc.lifecycleStage)}
+                      </span>
                       {doc.company && <span className="legal-doc-chip legal-doc-chip--company">🏢 {doc.company}</span>}
+                      {doc.category && <span className="legal-doc-chip">{doc.category}</span>}
                       {doc.year && <span className="legal-doc-chip">{doc.year}</span>}
                       {doc.size > 0 && <span className="legal-doc-chip">{sizeLabel(doc.size)}</span>}
                       {doc.status === 'Signed' && <span className="legal-doc-chip legal-doc-chip--signed">✅ Signed</span>}

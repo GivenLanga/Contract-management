@@ -17,11 +17,16 @@ vi.mock('../../../services/legalFolderAccess', () => ({
   reauthorizeLegalFolder: vi.fn(),
 }));
 
-vi.mock('../../../services/legalFolderStore', () => ({
-  getLegalFolderImport: vi.fn(() => ({ source: null, contracts: [], documents: [] })),
-  addDocumentToLegalFolderImport: vi.fn(),
-  LEGAL_FOLDER_UPDATED: 'legal-folder-updated',
-}));
+vi.mock('../../../services/legalFolderStore', () => {
+  const getLegalFolderImport = vi.fn(() => ({ source: null, contracts: [], documents: [] }));
+  return {
+    getLegalFolderImport,
+    addDocumentToLegalFolderImport: vi.fn(),
+    subscribeToDesktopLifecycleIndex: vi.fn(() => () => {}),
+    syncLifecycleIndexFromDesktop: vi.fn(() => Promise.resolve(getLegalFolderImport())),
+    LEGAL_FOLDER_UPDATED: 'legal-folder-updated',
+  };
+});
 
 vi.mock('../../../services/legalFolderFileStore', () => ({
   getLegalFolderFile: vi.fn(),
@@ -40,6 +45,7 @@ vi.mock('../../../services/legalFolderPathBuilder', () => ({
 
 vi.mock('../../../services/templateDraftWriter', () => ({
   createDraftDocx: vi.fn(),
+  formatUnresolvedPlaceholder: vi.fn((item) => item?.placeholder || item?.normalizedKey || ''),
 }));
 
 vi.mock('../../../services/templateDocumentScanner', () => ({
@@ -79,6 +85,7 @@ import {
   writeDraftToFolder,
 } from '../../../services/legalFolderPathBuilder';
 import { createDraftDocx } from '../../../services/templateDraftWriter';
+import { isScannable, scanDocx } from '../../../services/templateDocumentScanner';
 import { openDraft } from '../../../services/draftOpenService';
 
 import Templates from '../Templates';
@@ -126,6 +133,9 @@ function fakeDocument() {
     contract: { id: 'c1' },
     source: 'shared-folder',
     status: 'Draft',
+    lifecycleStage: 'TEMPLATE',
+    agreementFamily: 'ONCE_OFF_SERVICE_AGREEMENT',
+    category: 'Service',
     updatedAt: new Date().toISOString(),
     uploadedBy: { name: 'Shared Folder' },
   };
@@ -184,6 +194,43 @@ afterEach(() => {
 // ── 1. Templates visible with index-only state ────────────────────────────────
 
 describe('Templates page — index-only state', () => {
+  it('reads TEMPLATE lifecycle stage files as templates', async () => {
+    const source = fakeSource();
+    getLegalFolderImport.mockReturnValue({
+      source,
+      contracts: [],
+      documents: [{
+        ...fakeDocument(),
+        sourcePath: 'Contracts/2026/Services/Acme/Drafts/Service Agreement.docx',
+        lifecycleStage: 'TEMPLATE',
+      }],
+    });
+    getLegalFolderStatus.mockResolvedValue(statusFor(FOLDER_STATE.WRITE_REAUTH_REQUIRED));
+
+    renderTemplates();
+
+    await waitFor(() => {
+      expect(screen.getByText('Service Agreement Template')).toBeInTheDocument();
+    });
+  });
+
+  it('removes template cards when the lifecycle index no longer contains them', async () => {
+    setupIndexWithTemplates();
+    getLegalFolderStatus.mockResolvedValue(statusFor(FOLDER_STATE.WRITE_REAUTH_REQUIRED));
+
+    renderTemplates();
+    await waitFor(() => screen.getByText('Service Agreement Template'));
+
+    getLegalFolderImport.mockReturnValue({ source: fakeSource(), contracts: [], documents: [] });
+    act(() => {
+      window.dispatchEvent(new Event('legal-folder-updated'));
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Service Agreement Template')).not.toBeInTheDocument();
+    });
+  });
+
   it('shows template cards when index exists even without write access', async () => {
     setupIndexWithTemplates();
     getLegalFolderStatus.mockResolvedValue(statusFor(FOLDER_STATE.WRITE_REAUTH_REQUIRED));
@@ -341,6 +388,59 @@ describe('DraftModal — WRITE_READY', () => {
     });
   });
 
+  it('in Electron, reads the template from the Legal Folder instead of browser cache', async () => {
+    setupIndexWithTemplates();
+    getLegalFolderStatus.mockResolvedValue(statusFor(FOLDER_STATE.WRITE_READY));
+    getLegalFolderFile.mockResolvedValue(null);
+    getLegalFolderHandle.mockReturnValue({ name: 'Legal Folder' });
+    window.contractiq = {
+      readLegalFolderFile: vi.fn().mockResolvedValue({
+        ok: true,
+        fileName: 'Service Agreement Template.docx',
+        extension: '.docx',
+        relativePath: 'Templates/Service Agreement Template.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        arrayBuffer: new TextEncoder().encode('docx').buffer,
+      }),
+    };
+
+    renderTemplates();
+    await waitFor(() => screen.getByText('Service Agreement Template'));
+    fireEvent.click(screen.getAllByText('Use')[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText('Draft from Template')).toBeInTheDocument();
+    });
+    expect(window.contractiq.readLegalFolderFile).toHaveBeenCalledWith({
+      relativePath: 'Templates/Service Agreement Template.docx',
+    });
+    expect(getLegalFolderFile).not.toHaveBeenCalled();
+    expect(screen.queryByText('Template File Not Cached')).not.toBeInTheDocument();
+  });
+
+  it('shows a Legal Folder missing-file message when Electron cannot find the template', async () => {
+    setupIndexWithTemplates();
+    getLegalFolderStatus.mockResolvedValue(statusFor(FOLDER_STATE.WRITE_READY));
+    getLegalFolderFile.mockResolvedValue(null);
+    window.contractiq = {
+      readLegalFolderFile: vi.fn().mockResolvedValue({
+        ok: false,
+        code: 'FILE_NOT_FOUND',
+        message: 'Missing',
+      }),
+    };
+
+    renderTemplates();
+    await waitFor(() => screen.getByText('Service Agreement Template'));
+    fireEvent.click(screen.getAllByText('Use')[0]);
+
+    await waitFor(() => {
+      expect(screen.getByText('Template File Not Found')).toBeInTheDocument();
+    });
+    expect(screen.getByText(/could not be found in the connected Legal Folder/)).toBeInTheDocument();
+    expect(screen.queryByText(/browser cache/i)).not.toBeInTheDocument();
+  });
+
   it('writes directly to Legal Folder without opening OS save dialog', async () => {
     window.showSaveFilePicker = vi.fn();
     setupIndexWithTemplates();
@@ -369,6 +469,78 @@ describe('DraftModal — WRITE_READY', () => {
       expect(writeDraftToFolder).toHaveBeenCalled();
       expect(window.showSaveFilePicker).not.toHaveBeenCalled();
     });
+  });
+
+  it('passes structured placeholder fields and detected placeholders to createDraftDocx', async () => {
+    setupIndexWithTemplates();
+    getLegalFolderStatus.mockResolvedValue(statusFor(FOLDER_STATE.WRITE_READY));
+    ensureLegalFolderWriteAccess.mockResolvedValue(FOLDER_STATE.WRITE_READY);
+    getLegalFolderFile.mockResolvedValue({ blob: new Blob(['docx']), type: 'docx' });
+    getLegalFolderHandle.mockReturnValue({ name: 'Legal Folder', kind: 'directory' });
+    isScannable.mockReturnValueOnce(true);
+    scanDocx.mockResolvedValueOnce({
+      placeholders: [
+        {
+          key: 'insert_company_name',
+          raw: '[INSERT COMPANY NAME]',
+          label: 'Company Name',
+          group: 'Parties',
+        },
+        {
+          key: 'insert_reg_no',
+          raw: '[INSERT REG. NO.]',
+          label: 'Registration Number',
+          group: 'Registration Details',
+        },
+      ],
+      blankFields: [],
+      warnings: [],
+    });
+    createDraftDocx.mockResolvedValue({
+      blob: new Blob(['out']),
+      warnings: [],
+      replacementReport: { replaced: [], unresolved: [], warnings: [] },
+    });
+    buildDraftDestination.mockResolvedValue({
+      directoryHandle: {},
+      fileName: 'Service Agreement - Acme - Draft v1.docx',
+      relativePath: 'Contracts/2026/Services/Acme/Drafts/Service Agreement - Acme - Draft v1.docx',
+      displayPath: 'Contracts/2026/Services/Acme/Drafts/Service Agreement - Acme - Draft v1.docx',
+    });
+    writeDraftToFolder.mockResolvedValue(undefined);
+
+    renderTemplates();
+    await waitFor(() => screen.getByText('Service Agreement Template'));
+    fireEvent.click(screen.getAllByText('Use')[0]);
+    await waitFor(() => screen.getByText('Draft from Template'));
+
+    fireEvent.change(screen.getAllByPlaceholderText(/ABC Suppliers/)[1], { target: { value: 'BackSlash' } });
+    fireEvent.change(screen.getByPlaceholderText('Company Name'), {
+      target: { value: 'ContractIQ RF Proprietary Limited' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('Registration Number'), {
+      target: { value: '2026/123456/07' },
+    });
+    fireEvent.click(screen.getByText('Create Draft'));
+
+    await waitFor(() => expect(createDraftDocx).toHaveBeenCalled());
+    expect(createDraftDocx.mock.calls[0][1]).toMatchObject({
+      fields: {
+        counterparty: 'BackSlash',
+        counterpartyName: 'BackSlash',
+        companyName: 'ContractIQ RF Proprietary Limited',
+        insertCompanyName: 'ContractIQ RF Proprietary Limited',
+        registrationNumber: '2026/123456/07',
+        insertRegNo: '2026/123456/07',
+      },
+      placeholderValues: {
+        insert_company_name: 'ContractIQ RF Proprietary Limited',
+        '[INSERT COMPANY NAME]': 'ContractIQ RF Proprietary Limited',
+        insert_reg_no: '2026/123456/07',
+        '[INSERT REG. NO.]': '2026/123456/07',
+      },
+    });
+    expect(createDraftDocx.mock.calls[0][1].detectedPlaceholders).toHaveLength(2);
   });
 
   it('does not use anchor download for the draft', async () => {
@@ -791,6 +963,14 @@ describe('Draft Created modal — browser_fallback shown on open failure', () =>
     window.contractiq = {
       openDraft: vi.fn(),
       chooseLegalFolder: vi.fn(),
+      readLegalFolderFile: vi.fn().mockResolvedValue({
+        ok: true,
+        fileName: 'Service Agreement Template.docx',
+        extension: '.docx',
+        relativePath: 'Templates/Service Agreement Template.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        arrayBuffer: new TextEncoder().encode('docx').buffer,
+      }),
     };
     openDraft.mockResolvedValue({
       ok: false,
@@ -814,6 +994,14 @@ describe('Draft Created modal — Legal Folder root selection', () => {
     window.contractiq = {
       openDraft: vi.fn(),
       chooseLegalFolder: vi.fn(),
+      readLegalFolderFile: vi.fn().mockResolvedValue({
+        ok: true,
+        fileName: 'Service Agreement Template.docx',
+        extension: '.docx',
+        relativePath: 'Templates/Service Agreement Template.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        arrayBuffer: new TextEncoder().encode('docx').buffer,
+      }),
     };
     openDraft.mockResolvedValue({
       ok: false,
@@ -841,6 +1029,14 @@ describe('Draft Created modal — Legal Folder root selection', () => {
         name: 'sa_mock_contracts_pack',
         sourceId: 'legal-folder:test',
         rootName: 'sa_mock_contracts_pack',
+      }),
+      readLegalFolderFile: vi.fn().mockResolvedValue({
+        ok: true,
+        fileName: 'Service Agreement Template.docx',
+        extension: '.docx',
+        relativePath: 'Templates/Service Agreement Template.docx',
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        arrayBuffer: new TextEncoder().encode('docx').buffer,
       }),
     };
     openDraft

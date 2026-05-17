@@ -47,9 +47,19 @@
   color: #b91c1c;
 }
 
+.badge--expiring-soon {
+  background: #ffedd5;
+  color: #c2410c;
+}
+
 .badge--terminated {
   background: #fce7f3;
   color: #9d174d;
+}
+
+.badge--unknown {
+  background: #f1f5f9;
+  color: #475569;
 }
 
 .badge--executed {

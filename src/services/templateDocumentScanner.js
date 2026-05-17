@@ -4,6 +4,12 @@
 //
 // No server upload required. Operates entirely in the browser.
 
+import {
+  humanizePlaceholderLabel,
+  normalizePlaceholderKey,
+  xmlDecodeText,
+} from './templatePlaceholderUtils';
+
 // ── ZIP reader (no external dependency) ──────────────────────────────────────
 
 const readUint16 = (view, offset) => view.getUint16(offset, true);
@@ -87,17 +93,6 @@ async function listZipEntries(arrayBuffer) {
 
 // ── XML helpers ───────────────────────────────────────────────────────────────
 
-function decodeEntities(s) {
-  return s
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-    .replace(/&#x([\da-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
-}
-
 // Reconstruct paragraph-level text by joining all <w:t> content within each <w:p>.
 // This handles placeholders split across OOXML runs at the paragraph boundary.
 function extractParagraphTexts(xml) {
@@ -109,7 +104,7 @@ function extractParagraphTexts(xml) {
   for (const m of xml.matchAll(paraRe)) {
     const parts = [];
     for (const t of m[0].matchAll(textRe)) {
-      parts.push(decodeEntities(t[1]));
+      parts.push(xmlDecodeText(t[1]));
     }
     const text = parts.join('');
     if (text.trim()) paras.push(text);
@@ -120,9 +115,13 @@ function extractParagraphTexts(xml) {
 // ── Placeholder detection ─────────────────────────────────────────────────────
 
 // [PLACEHOLDER TEXT] — square bracket, 1–80 chars, may contain spaces/slashes/dots
-const SQUARE_RE = /\[([A-Za-z][^\[\]\n]{0,80}?)\]/g;
+const SQUARE_RE = /\[([A-Za-z][^[\]\n]{0,80}?)\]/g;
 // {{PlaceholderName}} — curly double braces
 const CURLY_RE = /\{\{([A-Za-z][^{}\n]{0,80})\}\}/g;
+// INSERT_COMPANY_NAME / INSERT_REG._NO. style placeholders
+const UPPER_UNDERSCORE_RE = /\b[A-Z][A-Z0-9]*(?:[._]+[A-Z0-9]+)+\.?\b/g;
+// A small set of plain uppercase placeholders when they occupy a field-like run.
+const PLAIN_PLACEHOLDER_RE = /^(COMPANY|COUNTERPARTY|COUNTERPARTY NAME|DATE|EFFECTIVE DATE|COMMENCEMENT DATE)$/;
 // Blank form label: "Label text:" optionally followed by underscores/dots/nothing
 const BLANK_FIELD_RE = /^([A-Za-z][A-Za-z /\-,]+?):\s*(?:_{2,}|\.{2,}|\*{2,})?\s*$/;
 // Signing field patterns
@@ -171,7 +170,7 @@ const FIELD_GROUPS = {
 };
 
 function guessGroup(raw) {
-  const up = raw.toUpperCase().trim();
+  const up = normalizePlaceholderKey(raw).replace(/_/g, ' ').toUpperCase();
   for (const [key, group] of Object.entries(FIELD_GROUPS)) {
     if (up.includes(key)) return group;
   }
@@ -179,13 +178,11 @@ function guessGroup(raw) {
 }
 
 function normaliseKey(raw) {
-  return raw.trim().toUpperCase().replace(/\s+/g, '_');
+  return normalizePlaceholderKey(raw);
 }
 
 function toLabel(raw) {
-  return raw.trim()
-    .replace(/[_]+/g, ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  return humanizePlaceholderLabel(raw);
 }
 
 function scanParagraphs(paragraphs) {
@@ -230,6 +227,45 @@ function scanParagraphs(paragraphs) {
           required: true,
           occurrences: 1,
           group: guessGroup(raw),
+        });
+      }
+    }
+
+    // Uppercase underscore placeholders like INSERT_COMPANY_NAME.
+    for (const m of para.matchAll(UPPER_UNDERSCORE_RE)) {
+      const raw = m[0];
+      const key = normaliseKey(raw);
+      if (placeholderMap.has(key)) {
+        placeholderMap.get(key).occurrences++;
+      } else {
+        placeholderMap.set(key, {
+          key,
+          label: toLabel(raw),
+          raw,
+          type: 'underscore',
+          required: true,
+          occurrences: 1,
+          group: guessGroup(raw),
+        });
+      }
+    }
+
+    // Plain placeholders are only detected when the whole paragraph/run text is
+    // an obvious field token, not when the word appears in normal legal prose.
+    const plain = para.trim();
+    if (PLAIN_PLACEHOLDER_RE.test(plain)) {
+      const key = normaliseKey(plain);
+      if (placeholderMap.has(key)) {
+        placeholderMap.get(key).occurrences++;
+      } else {
+        placeholderMap.set(key, {
+          key,
+          label: toLabel(plain),
+          raw: plain,
+          type: 'plain',
+          required: true,
+          occurrences: 1,
+          group: guessGroup(plain),
         });
       }
     }
@@ -284,18 +320,28 @@ function scanParagraphs(paragraphs) {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-const DOCX_PARTS = [
-  'word/document.xml',
-  'word/header1.xml',
-  'word/header2.xml',
-  'word/header3.xml',
-  'word/footer1.xml',
-  'word/footer2.xml',
-  'word/footer3.xml',
-  'word/footnotes.xml',
-  'word/endnotes.xml',
-  'word/comments.xml',
-];
+function getDocxTextParts(entries) {
+  const priority = new Map([
+    ['word/document.xml', 0],
+    ['word/footnotes.xml', 1],
+    ['word/endnotes.xml', 2],
+    ['word/comments.xml', 3],
+  ]);
+  return entries
+    .filter((entry) => entry.startsWith('word/') && entry.endsWith('.xml'))
+    .filter((entry) => (
+      entry === 'word/document.xml' ||
+      /^word\/header\d+\.xml$/.test(entry) ||
+      /^word\/footer\d+\.xml$/.test(entry) ||
+      /^word\/textbox.*\.xml$/.test(entry) ||
+      ['word/footnotes.xml', 'word/endnotes.xml', 'word/comments.xml'].includes(entry)
+    ))
+    .sort((a, b) => {
+      const ap = priority.has(a) ? priority.get(a) : 10;
+      const bp = priority.has(b) ? priority.get(b) : 10;
+      return ap - bp || a.localeCompare(b);
+    });
+}
 
 /**
  * Scans a DOCX File/Blob for placeholders and blank form fields.
@@ -315,8 +361,7 @@ export async function scanDocx(blob, templateTitle = '') {
 
   const paragraphs = [];
 
-  for (const part of DOCX_PARTS) {
-    if (!entries.includes(part)) continue;
+  for (const part of getDocxTextParts(entries)) {
     try {
       const xml = await extractFromZip(arrayBuffer, part);
       if (xml) paragraphs.push(...extractParagraphTexts(xml));

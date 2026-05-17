@@ -14,6 +14,12 @@ function safeOpenDraftPayload(args = {}) {
   };
 }
 
+function safeReadLegalFolderFilePayload(args = {}) {
+  return {
+    relativePath: args.relativePath,
+  };
+}
+
 contextBridge.exposeInMainWorld('contractiq', {
   isDesktop: true,
   getDesktopStatus: async () => {
@@ -39,6 +45,64 @@ contextBridge.exposeInMainWorld('contractiq', {
     const result = await ipcRenderer.invoke('desktop:getLegalFolderRoot');
     console.info('[contractiq preload] getLegalFolderRoot result', result);
     return result;
+  },
+  readLegalFolderFile: async (args) => {
+    console.info('[contractiq preload] readLegalFolderFile called from renderer');
+    console.info('[contractiq preload] readLegalFolderFile payload', safeReadLegalFolderFilePayload(args));
+    const result = await ipcRenderer.invoke('desktop:readLegalFolderFile', args);
+    console.info('[contractiq preload] readLegalFolderFile result', {
+      ok: result?.ok,
+      code: result?.code || null,
+      fileName: result?.fileName || null,
+      extension: result?.extension || null,
+      relativePath: result?.relativePath || args?.relativePath || null,
+      bytes: result?.arrayBuffer?.byteLength || null,
+    });
+    return result;
+  },
+  getLifecycleIndex: async () => {
+    console.info('[contractiq preload] getLifecycleIndex called from renderer');
+    const result = await ipcRenderer.invoke('desktop:getLifecycleIndex');
+    console.info('[contractiq preload] getLifecycleIndex result', {
+      ok: result?.ok,
+      hasRoot: result?.hasRoot,
+      rootName: result?.rootName,
+      summary: result?.summary,
+    });
+    return result;
+  },
+  rescanLegalFolderLifecycle: async () => {
+    console.info('[contractiq preload] rescanLegalFolderLifecycle called from renderer');
+    const result = await ipcRenderer.invoke('desktop:rescanLegalFolderLifecycle');
+    console.info('[contractiq preload] rescanLegalFolderLifecycle result', {
+      ok: result?.ok,
+      summary: result?.summary,
+    });
+    return result;
+  },
+  disconnectLegalFolder: async () => {
+    console.info('[contractiq preload] disconnectLegalFolder called from renderer');
+    const result = await ipcRenderer.invoke('desktop:disconnectLegalFolder');
+    console.info('[contractiq preload] disconnectLegalFolder result', {
+      ok: result?.ok,
+      summary: result?.summary,
+      message: result?.message,
+    });
+    return result;
+  },
+  onLifecycleUpdated: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    const listener = (_event, payload) => {
+      console.info('[contractiq preload] lifecycle update received', {
+        ok: payload?.ok,
+        eventType: payload?.eventType,
+        summary: payload?.summary,
+        notification: payload?.notification || null,
+      });
+      callback(payload);
+    };
+    ipcRenderer.on('desktop:lifecycleUpdated', listener);
+    return () => ipcRenderer.removeListener('desktop:lifecycleUpdated', listener);
   },
   openDraft: async (args) => {
     console.info('[contractiq preload] openDraft called from renderer');

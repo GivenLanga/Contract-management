@@ -56,17 +56,50 @@ const GENERIC_FOLDERS = new Set([
   'training templates',
 ]);
 
+const LIFECYCLE_STAGE = Object.freeze({
+  TEMPLATE: 'TEMPLATE',
+  DRAFT: 'DRAFT',
+  FINAL: 'FINAL',
+  SIGNED: 'SIGNED',
+  UNKNOWN: 'UNKNOWN',
+});
+
+const TEMPLATE_STAGE_FOLDERS = new Set([
+  'templates',
+  'legal templates',
+  'contract templates',
+  'standard templates',
+  'precedents',
+]);
+
+const LIFECYCLE_STAGE_FOLDERS = new Map([
+  ['drafts', LIFECYCLE_STAGE.DRAFT],
+  ['draft', LIFECYCLE_STAGE.DRAFT],
+  ['working drafts', LIFECYCLE_STAGE.DRAFT],
+  ['final', LIFECYCLE_STAGE.FINAL],
+  ['finals', LIFECYCLE_STAGE.FINAL],
+  ['approved', LIFECYCLE_STAGE.FINAL],
+  ['approved final', LIFECYCLE_STAGE.FINAL],
+  ['signed', LIFECYCLE_STAGE.SIGNED],
+  ['executed', LIFECYCLE_STAGE.SIGNED],
+  ['fully signed', LIFECYCLE_STAGE.SIGNED],
+  ['completed', LIFECYCLE_STAGE.SIGNED],
+]);
+
 const TEXT_EXTRACT_EXTENSIONS = new Set(['docx', 'txt', 'md', 'rtf', 'csv', 'json']);
 const SKIPPED_FILE_PATTERN = /(^\.|^~\$|\.tmp$|\.lock$|\.crdownload$|\.part$)/i;
 const GENERIC_FILE_NAME = /\b(annexure|appendix|attachment|comments|exhibit|redline|redlines|schedule|scope|signed copy|version|v\d+(?:\.\d+)*)\b/i;
 
-// Returns true if the file lives inside a drafts folder anywhere in its path
-const isInDraftsFolder = (pathParts) =>
-  pathParts.slice(0, -1).some((part) => part.toLowerCase() === 'drafts');
-
 // Detects the corporate nesting pattern: RootFolder/Year/Company/StatusFolder/file
 // Returns { year, company } when the pattern is found, otherwise null
-const detectNestedStructure = (pathParts) => {
+const detectNestedStructure = (pathParts, lifecycleInfo = null) => {
+  if (lifecycleInfo?.year || lifecycleInfo?.counterparty) {
+    return {
+      year: lifecycleInfo.year || null,
+      company: lifecycleInfo.counterparty || null,
+      category: lifecycleInfo.category || null,
+    };
+  }
   const yearIdx = pathParts.findIndex((part) => /^20\d{2}$/.test(part));
   if (yearIdx === -1 || yearIdx + 1 >= pathParts.length - 1) return null;
   const companyPart = pathParts[yearIdx + 1];
@@ -120,6 +153,88 @@ const extensionOf = (name) => {
 };
 
 const baseNameOf = (name) => String(name || '').replace(/\.[^.]+$/, '');
+
+const inferAgreementFamilyFromPath = (sourcePath = '', category = '') => {
+  const text = `${category} ${baseNameOf(sourcePath)}`.replace(/[_-]+/g, ' ').toLowerCase();
+  if (text.includes('addendum')) return 'ADDENDUM';
+  if (text.includes('assistance')) return 'ASSISTANCE_AGREEMENT';
+  if (text.includes('consultancy') || text.includes('consultant')) return 'CONSULTANCY_AGREEMENT';
+  if (text.includes('funding loan') || /\bloan\b/.test(text)) return 'FUNDING_LOAN_AGREEMENT';
+  if (text.includes('master service') || /\bmsa\b/.test(text)) return 'MASTER_SERVICE_AGREEMENT';
+  if (text.includes('service provider') || text.includes('service agreement')) return 'ONCE_OFF_SERVICE_AGREEMENT';
+  if (text.includes('non disclosure') || text.includes('non-disclosure') || /\bnda\b/.test(text)) return 'NDA';
+  if (text.includes('statement of work') || /\bsow\b/.test(text)) return 'SOW';
+  if (text.includes('vendor') || text.includes('supplier')) return 'VENDOR_AGREEMENT';
+  if (text.includes('license') || text.includes('licence')) return 'LICENSE_AGREEMENT';
+  if (text.includes('employment')) return 'EMPLOYMENT_AGREEMENT';
+  if (text.includes('data processing') || /\bdpa\b/.test(text)) return 'DPA';
+  if (text.includes('partnership')) return 'PARTNERSHIP_AGREEMENT';
+  if (text.includes('agreement') || text.includes('contract')) return 'GENERAL_CONTRACT';
+  return 'OTHER';
+};
+
+export const classifyLegalFolderEntryPath = (sourcePath) => {
+  const pathParts = normalisePath(sourcePath);
+  const folderParts = pathParts.slice(0, -1);
+  const lowerFolders = folderParts.map((part) => part.toLowerCase());
+  const base = {
+    lifecycleStage: LIFECYCLE_STAGE.UNKNOWN,
+    year: null,
+    category: null,
+    counterparty: null,
+    stageFolder: null,
+    agreementFamily: inferAgreementFamilyFromPath(sourcePath),
+    isTemplate: false,
+    isContractDocument: false,
+  };
+
+  const templateIdx = lowerFolders.findIndex((part) => TEMPLATE_STAGE_FOLDERS.has(part));
+  if (templateIdx >= 0) {
+    return {
+      ...base,
+      lifecycleStage: LIFECYCLE_STAGE.TEMPLATE,
+      stageFolder: folderParts[templateIdx],
+      isTemplate: true,
+    };
+  }
+
+  const contractsIdx = lowerFolders.findIndex((part) => part === 'contracts');
+  if (contractsIdx === -1) return base;
+
+  const stageIdx = lowerFolders.findIndex((part, index) =>
+    index > contractsIdx && LIFECYCLE_STAGE_FOLDERS.has(part)
+  );
+  if (stageIdx === -1) return { ...base, isContractDocument: true };
+
+  const contractParts = folderParts.slice(contractsIdx + 1, stageIdx);
+  const yearIdx = contractParts.findIndex((part) => /^20\d{2}$/.test(part));
+  const year = yearIdx >= 0 ? contractParts[yearIdx] : null;
+  const category = yearIdx >= 0 ? contractParts[yearIdx + 1] || null : contractParts[0] || null;
+  const counterparty = yearIdx >= 0
+    ? contractParts.slice(yearIdx + 2).join('/') || null
+    : contractParts.slice(1).join('/') || null;
+  const stageFolder = folderParts[stageIdx];
+  const lifecycleStage = LIFECYCLE_STAGE_FOLDERS.get(stageFolder.toLowerCase()) || LIFECYCLE_STAGE.UNKNOWN;
+
+  return {
+    ...base,
+    lifecycleStage,
+    year,
+    category,
+    counterparty,
+    stageFolder,
+    agreementFamily: inferAgreementFamilyFromPath(sourcePath, category || ''),
+    isContractDocument: true,
+  };
+};
+
+const statusFromLifecycleStage = (stage, fallback = 'Active') => {
+  if (stage === LIFECYCLE_STAGE.TEMPLATE) return 'Template';
+  if (stage === LIFECYCLE_STAGE.DRAFT) return 'Draft';
+  if (stage === LIFECYCLE_STAGE.FINAL) return 'Ready for Signature';
+  if (stage === LIFECYCLE_STAGE.SIGNED) return 'Signed';
+  return fallback;
+};
 
 const decodeXmlEntities = (value) =>
   String(value || '')
@@ -374,10 +489,45 @@ const inferDates = (text) => {
 };
 
 const inferValue = (text) => {
-  const match = text.match(/\b(?:zar|usd|r|\$)\s*([\d,]+(?:\.\d{1,2})?)/i);
+  const match = text.match(/\b(?:zar|r)\s*([\d\s,]+(?:\.\d+)?)\s*(million)?/i);
   if (!match) return 0;
-  const value = Number(match[1].replace(/,/g, ''));
-  return Number.isFinite(value) ? value : 0;
+  const value = Number(match[1].replace(/[\s,]/g, ''));
+  if (!Number.isFinite(value)) return 0;
+  return /million/i.test(match[2] || '') ? Math.round(value * 1000000) : value;
+};
+
+const CONTRACT_STATUS_LABELS = {
+  ACTIVE: 'Active',
+  EXPIRED: 'Expired',
+  EXPIRING_SOON: 'Expiring Soon',
+  TERMINATED: 'Terminated',
+  UNKNOWN: 'Unknown',
+};
+
+const contractStatusLabel = (status) =>
+  CONTRACT_STATUS_LABELS[String(status || '').toUpperCase()] || null;
+
+const optionalNumber = (value) => {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+};
+
+const deriveContractStatusLabel = ({ lifecycleStage, contractStatus, contractStatusLabel: label, expiryDate, endDate, terminationDate } = {}) => {
+  if (label && label !== 'Signed') return label;
+  const fromCode = contractStatusLabel(contractStatus);
+  if (fromCode) return fromCode;
+  if (terminationDate) return 'Terminated';
+  const resolvedEndDate = expiryDate || endDate;
+  if (!resolvedEndDate) return lifecycleStage === LIFECYCLE_STAGE.SIGNED ? 'Unknown' : null;
+  const today = new Date();
+  const todayMidnight = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
+  const end = new Date(`${String(resolvedEndDate).slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(end.getTime())) return lifecycleStage === LIFECYCLE_STAGE.SIGNED ? 'Unknown' : null;
+  const days = Math.ceil((end.getTime() - todayMidnight.getTime()) / 86400000);
+  if (days < 0) return 'Expired';
+  if (days <= 30) return 'Expiring Soon';
+  return 'Active';
 };
 
 const typeWordsPattern = /(first addendum|addendum|assistance agreement|consultancy agreement|financial services agreement|funding loan agreement|loan agreement|master services? agreement|services agreement|service agreement|non disclosure agreement|non-disclosure agreement|statement of work|scope of work|software license agreement|data processing agreement|partnership agreement|employment agreement|vendor agreement|\bmsa\b|\bnda\b|\bsow\b|\bdpa\b|\bdocx?\b|\bpdf\b)/gi;
@@ -477,29 +627,59 @@ const inferClauses = (text, typeValue) => {
   return unique(clauses.length ? clauses : ['Governing Terms', 'Termination']);
 };
 
-const makeDocument = (entry, contract, status, nestedInfo = null) => {
+const makeDocument = (entry, contract, status, nestedInfo = null, lifecycleInfo = null, sourceId = null) => {
   const ext = extensionOf(entry.name);
   const updatedAt = new Date(entry.lastModified || Date.now()).toISOString();
   const sourcePath = entry.relativePath || entry.name;
   const companyName = nestedInfo?.company ? titleCase(nestedInfo.company) : null;
+  const lifecycleStage = lifecycleInfo?.lifecycleStage || LIFECYCLE_STAGE.UNKNOWN;
 
   return {
-    _id: `DOC-${stableHash(`${sourcePath}-${entry.size}-${entry.lastModified}`)}`,
+    _id: lifecycleInfo?.id || `DOC-${stableHash(`${sourcePath}-${entry.size}-${entry.lastModified}`)}`,
     name: entry.name,
     type: ext,
     size: entry.size || 0,
     status,
     updatedAt,
     uploadedBy: { name: companyName || 'Shared Folder' },
-    contract: { id: contract.id, title: contract.title },
+    contract: contract ? { id: contract.id, title: contract.title } : null,
     source: 'shared-folder',
     sourcePath,
+    relativePath: sourcePath,
+    legalFolderRelativePath: sourcePath,
+    displayPath: sourcePath,
     company: companyName,
-    year: nestedInfo?.year || null,
+    counterparty: lifecycleInfo?.counterparty || companyName,
+    year: lifecycleInfo?.year || nestedInfo?.year || null,
+    category: lifecycleInfo?.category || nestedInfo?.category || null,
+    lifecycleStage,
+    documentStage: lifecycleStage,
+    stageFolder: lifecycleInfo?.stageFolder || null,
+    lifecycleReason: lifecycleInfo?.reason || lifecycleInfo?.lifecycleReason || null,
+    matchedSegment: lifecycleInfo?.matchedSegment || null,
+    lifecycleConfidence: lifecycleInfo?.confidence || lifecycleInfo?.lifecycleConfidence || null,
+    agreementFamily: lifecycleInfo?.agreementFamily || 'OTHER',
+    contractStatus: lifecycleInfo?.contractStatus || null,
+    contractStatusLabel: lifecycleInfo?.contractStatusLabel || null,
+    contractValue: lifecycleInfo?.contractValue ?? null,
+    contractValueDisplay: lifecycleInfo?.contractValueDisplay || null,
+    currency: lifecycleInfo?.currency || null,
+    effectiveDate: lifecycleInfo?.effectiveDate || null,
+    startDate: lifecycleInfo?.startDate || null,
+    commencementDate: lifecycleInfo?.commencementDate || null,
+    expiryDate: lifecycleInfo?.expiryDate || null,
+    expirationDate: lifecycleInfo?.expirationDate || null,
+    endDate: lifecycleInfo?.endDate || null,
+    terminationDate: lifecycleInfo?.terminationDate || null,
+    renewalDate: lifecycleInfo?.renewalDate || null,
+    signedDate: lifecycleInfo?.signedDate || null,
+    extraction: lifecycleInfo?.extraction || null,
+    sourceId,
+    missingFromDisk: false,
   };
 };
 
-const makeContractFromEntry = (entry, pathParts, sourceName, nestedInfo = null) => {
+const makeContractFromEntry = (entry, pathParts, sourceName, nestedInfo = null, lifecycleInfo = null) => {
   const sourcePath = entry.relativePath || entry.name;
   const fileBase = baseNameOf(entry.name);
   const nameSource = contractNameSource(fileBase, pathParts);
@@ -509,15 +689,28 @@ const makeContractFromEntry = (entry, pathParts, sourceName, nestedInfo = null) 
   const pathText = `${typeSignal} ${textContent.slice(0, 8000)}`;
   const templateLike = isTemplateLike(pathText);
   const type = inferType(typeSignal, { includeGeneric: false }) || inferType(pathText) || CONTRACT_TYPES[CONTRACT_TYPES.length - 1];
-  const status = inferStatusFromPath(pathParts) || inferStatus(pathText);
+  const lifecycleStage = lifecycleInfo?.lifecycleStage || LIFECYCLE_STAGE.UNKNOWN;
   const department = inferDepartment(pathText, pathParts);
-  const counterparty = nestedInfo?.company
+  const counterparty = lifecycleInfo?.counterparty
+    ? titleCase(lifecycleInfo.counterparty)
+    : nestedInfo?.company
     ? titleCase(nestedInfo.company)
     : (inferCounterpartyFromText(textContent) || inferCounterparty(nameSource, type));
   const title = `${type.label} - ${counterparty}`;
   const dates = templateLike ? [] : inferDates(pathText);
-  const startDate = dates.length > 1 ? dates[0] : null;
-  const endDate = dates.length > 1 ? dates[dates.length - 1] : null;
+  const startDate = lifecycleInfo?.effectiveDate || lifecycleInfo?.startDate || lifecycleInfo?.commencementDate || (dates.length > 1 ? dates[0] : null);
+  const endDate = lifecycleInfo?.expiryDate || lifecycleInfo?.expirationDate || lifecycleInfo?.endDate || lifecycleInfo?.terminationDate || (dates.length > 1 ? dates[dates.length - 1] : null);
+  const status = deriveContractStatusLabel({
+    lifecycleStage,
+    contractStatus: lifecycleInfo?.contractStatus,
+    contractStatusLabel: lifecycleInfo?.contractStatusLabel,
+    expiryDate: lifecycleInfo?.expiryDate || lifecycleInfo?.expirationDate,
+    endDate,
+    terminationDate: lifecycleInfo?.terminationDate,
+  }) || statusFromLifecycleStage(lifecycleStage, inferStatusFromPath(pathParts) || inferStatus(pathText));
+  const inferredValue = inferValue(pathText);
+  const extractedValue = optionalNumber(lifecycleInfo?.contractValue);
+  const value = extractedValue ?? inferredValue;
   const createdDate = isoDate(entry.lastModified);
   const owner = department === 'Legal' ? 'Legal Team' : `${department} Department`;
   const id = `LF-${stableHash(`${sourceName}-${sourcePath}`)}`;
@@ -531,14 +724,31 @@ const makeContractFromEntry = (entry, pathParts, sourceName, nestedInfo = null) 
     counterparty,
     owner,
     department,
-    value: inferValue(pathText),
+    value,
+    contractValue: extractedValue,
+    contractValueDisplay: lifecycleInfo?.contractValueDisplay || null,
+    currency: lifecycleInfo?.currency || null,
     startDate,
     endDate,
-    renewalDate: renewalFromEndDate(endDate),
+    effectiveDate: lifecycleInfo?.effectiveDate || null,
+    commencementDate: lifecycleInfo?.commencementDate || null,
+    expiryDate: lifecycleInfo?.expiryDate || lifecycleInfo?.expirationDate || null,
+    terminationDate: lifecycleInfo?.terminationDate || null,
+    signedDate: lifecycleInfo?.signedDate || null,
+    renewalDate: lifecycleInfo?.renewalDate || renewalFromEndDate(endDate),
     createdDate,
     tags: unique(['Legal Folder', department, type.value, extensionOf(entry.name).toUpperCase()]),
     priority: 'Medium',
     stage: stageFromStatus(status),
+    contractStatus: lifecycleInfo?.contractStatus || null,
+    contractStatusLabel: lifecycleInfo?.contractStatusLabel || status,
+    extraction: lifecycleInfo?.extraction || null,
+    lifecycleStage,
+    stageFolder: lifecycleInfo?.stageFolder || null,
+    lifecycleReason: lifecycleInfo?.reason || lifecycleInfo?.lifecycleReason || null,
+    matchedSegment: lifecycleInfo?.matchedSegment || null,
+    lifecycleConfidence: lifecycleInfo?.confidence || lifecycleInfo?.lifecycleConfidence || null,
+    agreementFamily: lifecycleInfo?.agreementFamily || type.value,
     description: heading
       ? `${heading}. Imported from ${sourceName}. Source path: ${sourcePath}`
       : `Imported from ${sourceName}. Source path: ${sourcePath}`,
@@ -553,6 +763,8 @@ const makeContractFromEntry = (entry, pathParts, sourceName, nestedInfo = null) 
     source: 'shared-folder',
     sourceFolder,
     sourcePath,
+    relativePath: sourcePath,
+    legalFolderRelativePath: sourcePath,
     year: nestedInfo?.year || null,
     importedAt: new Date().toISOString(),
   };
@@ -597,13 +809,13 @@ export const collectFilesFromDirectoryHandle = async (directoryHandle) => {
 export const buildLegalFolderImport = (entries, sourceName = 'Shared Folder') => {
   const documents = [];
   const skippedEntries = [];
+  const sourceId = entries.find((entry) => entry.lifecycleMetadata?.sourceId)?.lifecycleMetadata.sourceId || sourceName;
   const importableEntries = entries.filter((entry) => {
     const path = entry.relativePath || entry.name;
     const name = entry.name || path.split('/').pop();
     const pathParts = normalisePath(path);
     const hiddenPath = pathParts.some((part) => part.startsWith('.'));
-    const inDrafts = isInDraftsFolder(pathParts);
-    const skipped = !name || hiddenPath || SKIPPED_FILE_PATTERN.test(name) || inDrafts;
+    const skipped = !name || hiddenPath || SKIPPED_FILE_PATTERN.test(name);
 
     if (skipped) {
       skippedEntries.push({ name, path });
@@ -616,14 +828,23 @@ export const buildLegalFolderImport = (entries, sourceName = 'Shared Folder') =>
   const contracts = importableEntries.map((entry) => {
     const pathParts = normalisePath(entry.relativePath || entry.name);
     const name = entry.name || pathParts[pathParts.length - 1];
-    const nestedInfo = detectNestedStructure(pathParts);
-    const contract = makeContractFromEntry({ ...entry, name }, pathParts, sourceName, nestedInfo);
-    const document = makeDocument({ ...entry, name }, contract, contract.status, nestedInfo);
+    const lifecycleInfo = {
+      ...classifyLegalFolderEntryPath(entry.relativePath || entry.name),
+      ...(entry.lifecycleMetadata || {}),
+    };
+    const nestedInfo = detectNestedStructure(pathParts, lifecycleInfo);
+    const contract = makeContractFromEntry({ ...entry, name }, pathParts, sourceName, nestedInfo, lifecycleInfo);
+    const document = makeDocument({ ...entry, name }, contract, contract.status, nestedInfo, lifecycleInfo, sourceId);
 
     contract.relatedDocuments = [document];
-    contract.tags = unique([...(contract.tags || []), extensionOf(name).toUpperCase()]);
+    contract.tags = unique([
+      ...(contract.tags || []),
+      extensionOf(name).toUpperCase(),
+      lifecycleInfo.lifecycleStage !== LIFECYCLE_STAGE.UNKNOWN ? lifecycleInfo.lifecycleStage : '',
+    ]);
 
     documents.push(document);
+    if (lifecycleInfo.lifecycleStage === LIFECYCLE_STAGE.TEMPLATE) return null;
     return {
       ...contract,
       activity: [
@@ -631,23 +852,159 @@ export const buildLegalFolderImport = (entries, sourceName = 'Shared Folder') =>
         ...(contract.activity || []),
       ],
     };
-  }).sort((a, b) => a.title.localeCompare(b.title));
+  }).filter(Boolean).sort((a, b) => a.title.localeCompare(b.title));
+
+  const lifecycleSummary = documents.reduce((acc, doc) => {
+    const stage = doc.lifecycleStage || LIFECYCLE_STAGE.UNKNOWN;
+    if (stage === LIFECYCLE_STAGE.TEMPLATE) acc.templates += 1;
+    else if (stage === LIFECYCLE_STAGE.DRAFT) acc.drafts += 1;
+    else if (stage === LIFECYCLE_STAGE.FINAL) acc.finals += 1;
+    else if (stage === LIFECYCLE_STAGE.SIGNED) acc.signed += 1;
+    else acc.unknown += 1;
+    return acc;
+  }, { templates: 0, drafts: 0, finals: 0, signed: 0, unknown: 0 });
 
   return {
     source: {
       importerVersion: IMPORTER_VERSION,
-      importerMode: 'all-non-hidden-files',
+      importerMode: 'legal-folder-lifecycle',
       name: sourceName,
+      sourceId,
       syncedAt: new Date().toISOString(),
       scannedFileCount: entries.length,
       fileCount: importableEntries.length,
       skippedFileCount: skippedEntries.length,
       contractCount: contracts.length,
       skippedSamples: skippedEntries.slice(0, 5),
+      lifecycleSummary,
     },
     contracts,
     documents,
   };
+};
+
+const countLifecycleStages = (records = []) =>
+  records.reduce((counts, record) => {
+    const stage = String(record.lifecycleStage || 'UNKNOWN').toUpperCase();
+    counts[stage] = (counts[stage] || 0) + 1;
+    return counts;
+  }, { TEMPLATE: 0, DRAFT: 0, FINAL: 0, SIGNED: 0, UNKNOWN: 0 });
+
+const pathValueForRecord = (record = {}) =>
+  [
+    record.relativePath,
+    record.legalFolderPath,
+    record.sourcePath,
+    record.folderPath,
+    record.displayPath,
+    record.path,
+    record.filePath,
+    record.fullPath,
+    record.relativeFilePath,
+    record.legalFolderRelativePath,
+    record.sourceRelativePath,
+  ].filter(Boolean).join(' ');
+
+const hasSignedLikePath = (record = {}) =>
+  /\b(signed|executed|completed|sign)\b/i.test(pathValueForRecord(record).replace(/[_-]/g, ' '));
+
+const signedLikeRecords = (records = []) =>
+  records
+    .filter(hasSignedLikePath)
+    .map((record) => ({
+      title: record.title || record.name || record.fileName || null,
+      fileName: record.fileName || record.name || null,
+      relativePath: record.relativePath || null,
+      sourcePath: record.sourcePath || null,
+      displayPath: record.displayPath || null,
+      lifecycleStage: record.lifecycleStage || null,
+      documentStage: record.documentStage || null,
+      status: record.status || null,
+      lifecycleReason: record.lifecycleReason || record.reason || null,
+      matchedSegment: record.matchedSegment || null,
+    }));
+
+export const buildLegalFolderImportFromLifecycleIndex = (payload = {}) => {
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  const sourceName = payload.rootName || payload.name || 'Legal Folder';
+  const entries = files.map((file) => ({
+    name: file.fileName || String(file.relativePath || '').split('/').pop(),
+    size: file.fileSize || 0,
+    lastModified: file.lastModified || file.updatedAt || Date.now(),
+    relativePath: file.relativePath || file.displayPath || file.fileName,
+    textContent: '',
+    lifecycleMetadata: file,
+  }));
+  const snapshot = buildLegalFolderImport(entries, sourceName);
+  if (import.meta.env.DEV) {
+    const receivedCounts = countLifecycleStages(files);
+    const afterDocumentCounts = countLifecycleStages(snapshot.documents);
+    const afterContractCounts = countLifecycleStages(snapshot.contracts);
+    console.info('[legalFolderStore] lifecycle sync diagnostics', {
+      receivedTotal: files.length,
+      receivedSigned: receivedCounts.SIGNED,
+      receivedUnknown: receivedCounts.UNKNOWN,
+      afterConversionTotal: snapshot.contracts.length,
+      afterConversionSigned: afterContractCounts.SIGNED,
+      afterConversionUnknown: afterContractCounts.UNKNOWN,
+      afterConversionDocumentsTotal: snapshot.documents.length,
+      afterConversionDocumentsSigned: afterDocumentCounts.SIGNED,
+      afterConversionDocumentsUnknown: afterDocumentCounts.UNKNOWN,
+      signedLikeRecordsAfterConversion: signedLikeRecords([...snapshot.contracts, ...snapshot.documents]).slice(0, 20),
+    });
+  }
+  return {
+    ...snapshot,
+    source: {
+      ...snapshot.source,
+      sourceId: payload.sourceId || snapshot.source.sourceId || sourceName,
+      name: sourceName,
+      rootName: payload.rootName || sourceName,
+      lifecycleSummary: payload.summary || snapshot.source.lifecycleSummary,
+      scannedFileCount: payload.summary?.scanned ?? snapshot.source.scannedFileCount,
+      skippedFileCount: payload.summary?.skipped ?? snapshot.source.skippedFileCount,
+      fileCount: files.length,
+    },
+  };
+};
+
+export const applyLifecycleIndexPayload = (payload = {}) => {
+  if (!payload?.ok) return getLegalFolderImport();
+  const files = Array.isArray(payload.files) ? payload.files : [];
+  if (payload.eventType === 'disconnect' || (!payload.hasRoot && files.length === 0)) {
+    clearLegalFolderImport();
+    return getLegalFolderImport();
+  }
+  const snapshot = buildLegalFolderImportFromLifecycleIndex(payload);
+  saveLegalFolderImport(snapshot);
+  return snapshot;
+};
+
+export const syncLifecycleIndexFromDesktop = async () => {
+  if (typeof window === 'undefined' || typeof window.contractiq?.getLifecycleIndex !== 'function') {
+    return getLegalFolderImport();
+  }
+  const payload = await window.contractiq.getLifecycleIndex();
+  if (!payload?.ok) return getLegalFolderImport();
+  return applyLifecycleIndexPayload(payload);
+};
+
+export const LEGAL_FOLDER_LIFECYCLE_NOTIFICATION = 'legal-folder-lifecycle-notification';
+
+const emitLifecycleNotification = (notification) => {
+  if (typeof window === 'undefined' || !notification?.message) return;
+  window.dispatchEvent(new CustomEvent(LEGAL_FOLDER_LIFECYCLE_NOTIFICATION, { detail: notification }));
+};
+
+export const subscribeToDesktopLifecycleIndex = () => {
+  if (typeof window === 'undefined' || typeof window.contractiq?.onLifecycleUpdated !== 'function') {
+    return () => {};
+  }
+  return window.contractiq.onLifecycleUpdated((payload) => {
+    if (!payload?.ok) return;
+    applyLifecycleIndexPayload(payload);
+    if (payload.live && payload.notification) emitLifecycleNotification(payload.notification);
+  });
 };
 
 export const saveLegalFolderImport = (snapshot) => {

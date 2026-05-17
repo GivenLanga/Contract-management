@@ -319,6 +319,112 @@
   white-space: nowrap;
 }
 
+/* Signed-folder empty state */
+.contract-list__signed-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 64px 32px;
+  color: #8b9bb4;
+  text-align: center;
+}
+.contract-list__signed-empty span { font-size: 40px; display: block; margin-bottom: 16px; }
+.contract-list__signed-empty h3 { font-size: 18px; font-weight: 600; color: #2d3a52; margin: 0 0 8px; }
+.contract-list__signed-empty p { font-size: 14px; margin: 0 0 20px; max-width: 400px; }
+
+.contract-list__diagnostics {
+  background: #f8fafc;
+  border: 1px solid #e8edf3;
+  border-radius: 8px;
+  padding: 14px 20px;
+  text-align: left;
+  min-width: 260px;
+}
+.contract-list__diagnostics-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.contract-list__diagnostics ul {
+  list-style: disc;
+  margin: 0;
+  padding-left: 18px;
+}
+.contract-list__diagnostics ul li {
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.8;
+}
+
+.contract-list__lifecycle-debug {
+  margin-top: 16px;
+  max-width: 720px;
+  width: 100%;
+  background: #fff;
+  border: 1px solid #dbe4ef;
+  border-radius: 8px;
+  color: #334155;
+  padding: 12px 14px;
+  text-align: left;
+}
+
+.contract-list__lifecycle-debug summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.contract-list__lifecycle-debug dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 14px;
+  margin: 12px 0;
+}
+
+.contract-list__lifecycle-debug dl div {
+  background: #f8fafc;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.contract-list__lifecycle-debug dt {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 3px;
+  text-transform: uppercase;
+}
+
+.contract-list__lifecycle-debug dd {
+  color: #0f172a;
+  font-size: 13px;
+  margin: 0;
+}
+
+.contract-list__lifecycle-debug-list {
+  display: grid;
+  gap: 8px;
+}
+
+.contract-list__lifecycle-debug-item {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+}
+
+.contract-list__lifecycle-debug-item strong,
+.contract-list__lifecycle-debug-item span {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 /* Empty state */
 .contract-list__empty {
   text-align: center;

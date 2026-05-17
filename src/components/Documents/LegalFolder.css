@@ -124,6 +124,12 @@
 .legal-doc-chip { font-size: 12px; padding: 4px 10px; border-radius: 20px; background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
 .legal-doc-chip--signed { background: #dcfce7; color: #15803d; border-color: #86efac; }
 .legal-doc-chip--company { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+.legal-doc-chip--stage { font-weight: 800; }
+.legal-doc-chip--stage-template { background: #eef2ff; color: #3730a3; border-color: #c7d2fe; }
+.legal-doc-chip--stage-draft { background: #f8fafc; color: #475569; border-color: #cbd5e1; }
+.legal-doc-chip--stage-final { background: #fef9c3; color: #854d0e; border-color: #fde68a; }
+.legal-doc-chip--stage-signed { background: #dcfce7; color: #15803d; border-color: #86efac; }
+.legal-doc-chip--stage-unknown { background: #f3f4f6; color: #4b5563; border-color: #d1d5db; }
 
 .legal-doc-date { font-size: 11px; color: #94a3b8; text-align: right; }
 

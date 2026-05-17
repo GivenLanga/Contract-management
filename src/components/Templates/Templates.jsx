@@ -1,8 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Header from '../Layout/Header';
 import Modal from '../common/Modal';
-import { getLegalFolderImport, addDocumentToLegalFolderImport, LEGAL_FOLDER_UPDATED } from '../../services/legalFolderStore';
-import { getLegalFolderFile } from '../../services/legalFolderFileStore';
+import {
+  getLegalFolderImport,
+  addDocumentToLegalFolderImport,
+  LEGAL_FOLDER_UPDATED,
+  subscribeToDesktopLifecycleIndex,
+  syncLifecycleIndexFromDesktop,
+} from '../../services/legalFolderStore';
 import { getLegalFolderHandle } from '../../services/legalFolderHandle';
 import {
   getLegalFolderStatus,
@@ -17,7 +22,8 @@ import {
   mapAgreementFamilyToFolder,
   getExistingCategoryFolders,
 } from '../../services/legalFolderPathBuilder';
-import { createDraftDocx } from '../../services/templateDraftWriter';
+import { createDraftDocx, formatUnresolvedPlaceholder } from '../../services/templateDraftWriter';
+import { getTemplateFileDebugInfo, resolveTemplateFile } from '../../services/templateFileResolver';
 import { openDraft } from '../../services/draftOpenService';
 import { templates as templatesApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
@@ -68,24 +74,36 @@ function collectLocalTemplates() {
   const contractById = new Map((snapshot.contracts || []).map((c) => [c.id, c]));
 
   const templates = (snapshot.documents || [])
-    .filter((doc) => doc.sourcePath && isTemplatePath(doc.sourcePath))
+    .filter((doc) => doc.lifecycleStage === 'TEMPLATE' || (doc.sourcePath && isTemplatePath(doc.sourcePath)))
     .map((doc) => {
       const contract = contractById.get(doc.contract?.id);
       const ext = (doc.type || '').toLowerCase();
       const title = (doc.name || '').replace(/\.[^.]+$/, '');
-      const agreementFamily = TYPE_TO_FAMILY[contract?.type] || 'OTHER';
+      const agreementFamily = doc.agreementFamily || TYPE_TO_FAMILY[contract?.type] || 'OTHER';
 
       return {
         _id: doc._id,
         name: title,
         title,
+        fileName: doc.name,
         originalFileName: doc.name,
         agreementFamily,
-        category: contract?.type || 'General',
+        category: doc.category || contract?.type || 'General',
         extension: ext,
         fileType: ext,
         fileSize: doc.size || 0,
-        sourcePath: doc.sourcePath,
+        relativePath: doc.relativePath || doc.legalFolderRelativePath || doc.sourcePath,
+        legalFolderRelativePath: doc.legalFolderRelativePath || doc.relativePath || doc.sourcePath,
+        sourceRelativePath: doc.sourceRelativePath || doc.relativePath || doc.legalFolderRelativePath || doc.sourcePath,
+        sourcePath: doc.sourcePath || doc.relativePath || doc.legalFolderRelativePath,
+        legalFolderPath: doc.legalFolderPath,
+        folderPath: doc.folderPath,
+        displayPath: doc.displayPath || doc.sourcePath || doc.relativePath || doc.legalFolderRelativePath,
+        sourceId: doc.sourceId || snapshot.source?.sourceId || snapshot.source?.name || null,
+        sourceName: snapshot.source?.rootName || snapshot.source?.name || null,
+        rootName: snapshot.source?.rootName || snapshot.source?.name || null,
+        lifecycleStage: doc.lifecycleStage,
+        stageFolder: doc.stageFolder,
         updatedAt: doc.updatedAt,
         sourceKind: 'LEGAL_FOLDER_SYNC',
       };
@@ -186,6 +204,29 @@ function missingOpenDraftFields(createdDraft) {
     .filter((field) => !createdDraft?.[field]);
 }
 
+function getPlaceholderValueForKeys(values, keys) {
+  for (const key of keys) {
+    if (values[key]) return values[key];
+  }
+  return '';
+}
+
+function replacementReasonLabel(reason) {
+  if (reason === 'ambiguousAlias') return 'Ambiguous field mapping';
+  if (reason === 'invalidXmlPart') return 'Invalid document XML';
+  if (reason === 'replacementSkippedForSafety') return 'Needs manual review';
+  return 'No value provided';
+}
+
+function groupReplacementIssues(unresolved = []) {
+  return unresolved.reduce((groups, item) => {
+    const label = replacementReasonLabel(item.reason);
+    if (!groups[label]) groups[label] = [];
+    groups[label].push(item);
+    return groups;
+  }, {});
+}
+
 // ── Countdown progress ring ────────────────────────────────────────────────────
 
 function CountdownRing({ countdown, total = 5, size = 18, strokeWidth = 2.5 }) {
@@ -234,6 +275,7 @@ function DraftModal({ template, onClose, onCreated }) {
   const [scanResult, setScanResult] = useState(null);
   const [fileRecord, setFileRecord] = useState(null);
   const [scanError, setScanError] = useState('');
+  const [fileLoadError, setFileLoadError] = useState(null);
   const [existingFolders, setExistingFolders] = useState([]);
 
   const [documentTitle, setDocumentTitle] = useState(template?.title || template?.name || '');
@@ -270,6 +312,8 @@ function DraftModal({ template, onClose, onCreated }) {
     let cancelled = false;
 
     async function run() {
+      setFileLoadError(null);
+      setScanError('');
       // Step 1: check write access (loads handle from IDB, queries permission)
       let status;
       try {
@@ -279,38 +323,56 @@ function DraftModal({ template, onClose, onCreated }) {
       }
       if (cancelled) return;
 
+      const templateFileDebug = getTemplateFileDebugInfo(template);
+      const canUseDesktopFileReader = templateFileDebug.isDesktop && templateFileDebug.hasElectronFileReader;
+
       if (!status || status.state === FOLDER_STATE.DISCONNECTED) {
         setPhase('disconnected');
         return;
       }
 
-      if (status.state === FOLDER_STATE.UNSUPPORTED_BROWSER) {
+      if (status.state === FOLDER_STATE.UNSUPPORTED_BROWSER && !canUseDesktopFileReader) {
         setSourceName(status.sourceName);
         setPhase('unsupported-browser');
         return;
       }
 
-      if (status.state !== FOLDER_STATE.WRITE_READY) {
+      if (status.state !== FOLDER_STATE.WRITE_READY && !canUseDesktopFileReader) {
         // WRITE_REAUTH_REQUIRED or INDEX_ONLY
         setSourceName(status.sourceName);
         setPhase('write-reauth-required');
         return;
       }
 
-      // Step 2: load file from IDB cache
-      let record;
+      // Step 2: load the template. Desktop reads from the selected Legal Folder;
+      // browser-only mode falls back to the IndexedDB file cache.
+      let resolvedFile;
       try {
-        record = await getLegalFolderFile(template._id);
-      } catch {
-        record = null;
+        resolvedFile = await resolveTemplateFile(template);
+      } catch (err) {
+        if (!cancelled) {
+          setFileLoadError({
+            code: err?.code || 'TEMPLATE_FILE_RESOLVE_FAILED',
+            message: err?.userMessage || err?.message || 'Could not load the template file.',
+            attemptedRelativePath: err?.attemptedRelativePath || null,
+          });
+          setPhase('unavailable');
+        }
+        return;
       }
       if (cancelled) return;
 
-      if (!record || !record.blob) {
+      if (!resolvedFile?.blob) {
+        setFileLoadError({
+          code: 'TEMPLATE_FILE_RESOLVE_FAILED',
+          message: 'Could not load the template file.',
+          attemptedRelativePath: templateFileDebug.relativePath || null,
+        });
         setPhase('unavailable');
         return;
       }
 
+      const record = resolvedFile.record || { blob: resolvedFile.blob };
       setFileRecord(record);
 
       // Step 3: prefetch existing category folders for destination preview
@@ -335,7 +397,7 @@ function DraftModal({ template, onClose, onCreated }) {
 
     run();
     return () => { cancelled = true; };
-  }, [template._id, template.extension, template.title, retryKey]);
+  }, [template, retryKey]);
 
   // ── Re-authorize handler ────────────────────────────────────────────────────
   const handleReauthorize = async () => {
@@ -549,20 +611,59 @@ function DraftModal({ template, onClose, onCreated }) {
     }
 
     try {
-      const values = { ...phValues };
-      if (counterparty) {
-        values['COMPANY NAME'] = counterparty;
-        values['COMPANY'] = counterparty;
-        values['COUNTERPARTY'] = counterparty;
-        values['COUNTERPARTY NAME'] = counterparty;
-      }
-      if (effectiveDate) {
-        values['EFFECTIVE DATE'] = effectiveDate;
-        values['DATE'] = effectiveDate;
-        values['COMMENCEMENT DATE'] = effectiveDate;
+      const placeholderValues = {};
+      for (const ph of scanResult?.placeholders || []) {
+        const value = phValues[ph.key];
+        if (!value && value !== 0) continue;
+        placeholderValues[ph.key] = value;
+        if (ph.raw) placeholderValues[ph.raw] = value;
       }
 
-      const { blob, warnings } = await createDraftDocx(fileRecord.blob, values);
+      const explicitCompanyName = getPlaceholderValueForKeys(placeholderValues, [
+        'insert_company_name',
+        'company_name',
+        'company',
+        '[INSERT COMPANY NAME]',
+        '[COMPANY NAME]',
+      ]);
+      const registrationNumber = getPlaceholderValueForKeys(placeholderValues, [
+        'insert_reg_no',
+        'insert_beneficiary_reg_no',
+        'registration_number',
+        'registration_no',
+        'reg_no',
+        '[INSERT REG. NO.]',
+        '[INSERT REG NO]',
+      ]);
+      const explicitEffectiveDate = getPlaceholderValueForKeys(placeholderValues, [
+        'effective_date',
+        'commencement_date',
+        'insert_date',
+        'date',
+        '[EFFECTIVE DATE]',
+        '[INSERT DATE]',
+      ]);
+      const resolvedEffectiveDate = explicitEffectiveDate || effectiveDate;
+      const companyName = explicitCompanyName || counterparty.trim();
+
+      const draftInput = {
+        fields: {
+          counterparty: counterparty.trim(),
+          counterpartyName: counterparty.trim(),
+          companyName,
+          insertCompanyName: companyName,
+          registrationNumber,
+          insertRegNo: registrationNumber,
+          effectiveDate: resolvedEffectiveDate,
+          commencementDate: resolvedEffectiveDate,
+          insertDate: resolvedEffectiveDate,
+        },
+        placeholderValues,
+        detectedPlaceholders: scanResult?.placeholders || [],
+        agreementFamily: template.agreementFamily,
+      };
+
+      const { blob, warnings, replacementReport } = await createDraftDocx(fileRecord.blob, draftInput);
 
       const destination = await buildDraftDestination({
         rootHandle,
@@ -586,9 +687,14 @@ function DraftModal({ template, onClose, onCreated }) {
         uploadedBy: { name: counterparty.trim() },
         contract: { id: null, title: documentTitle.trim() || template.title },
         source: 'shared-folder',
+        sourceId: getLegalFolderImport().source?.sourceId || getLegalFolderImport().source?.name || null,
         sourcePath: destination.relativePath,
         company: counterparty.trim(),
         year: String(new Date().getFullYear()),
+        category: destination.category || categoryOverride.trim() || template.category || null,
+        counterparty: counterparty.trim(),
+        lifecycleStage: 'DRAFT',
+        stageFolder: 'Drafts',
         documentStage: 'DRAFT',
         createdFromTemplate: true,
         templateSourceKey: template.sourceKey,
@@ -607,6 +713,7 @@ function DraftModal({ template, onClose, onCreated }) {
         extension: 'docx',
         templateTitle: template.title || template.name,
         nativePath: null,
+        replacementReport,
         warnings,
       });
       setCountdown(5);
@@ -640,11 +747,16 @@ function DraftModal({ template, onClose, onCreated }) {
   // ── Phase renders ───────────────────────────────────────────────────────────
 
   if (phase === 'checking') {
+    const templateFileDebug = getTemplateFileDebugInfo(template);
     return (
       <Modal isOpen onClose={onClose} title="Preparing Draft" size="md">
         <div className="templates__draft-scanning">
           <div className="templates__state-spinner">⏳</div>
-          <p>Checking Legal Folder access…</p>
+          <p>
+            {templateFileDebug.isDesktop && templateFileDebug.hasElectronFileReader
+              ? 'Loading template from Legal Folder...'
+              : 'Checking Legal Folder access...'}
+          </p>
         </div>
       </Modal>
     );
@@ -745,16 +857,40 @@ function DraftModal({ template, onClose, onCreated }) {
   }
 
   if (phase === 'unavailable') {
+    const code = fileLoadError?.code || 'TEMPLATE_FILE_NOT_CACHED';
+    const isBrowserCacheMiss = code === 'TEMPLATE_FILE_NOT_CACHED';
+    const title = isBrowserCacheMiss
+      ? 'Template File Not Cached'
+      : code === 'FILE_NOT_FOUND'
+        ? 'Template File Not Found'
+        : 'Template File Unavailable';
+    const message = fileLoadError?.message || (
+      isBrowserCacheMiss
+        ? 'The template file is not available in browser cache. Sync the Legal Folder again.'
+        : 'Could not load the template file from the connected Legal Folder.'
+    );
     return (
-      <Modal isOpen onClose={onClose} title="Template File Not Cached" size="md">
+      <Modal isOpen onClose={onClose} title={title} size="md">
         <div className="templates__draft-unavailable">
           <span className="templates__draft-unavail-icon">📂</span>
           <p>
-            The template file is not available in the browser cache.
-            Please go to <strong>Legal Folder</strong> and sync the shared folder to reload files.
+            {message}
           </p>
+          {fileLoadError?.attemptedRelativePath && (
+            <p style={{ fontSize: '12px', color: '#64748b', wordBreak: 'break-all' }}>
+              {fileLoadError.attemptedRelativePath}
+            </p>
+          )}
           {scanError && <p className="templates__error-inline">{scanError}</p>}
           <div className="templates__use-actions" style={{ justifyContent: 'center' }}>
+            {!isBrowserCacheMiss && (
+              <button
+                className="templates__btn templates__btn--secondary"
+                onClick={() => { onClose(); navigateTo('/documents'); }}
+              >
+                Go to Legal Folder
+              </button>
+            )}
             <button className="templates__btn templates__btn--secondary" onClick={onClose}>Close</button>
           </div>
         </div>
@@ -771,6 +907,11 @@ function DraftModal({ template, onClose, onCreated }) {
       !bridgeState.isDesktop;
     const isOtherError = openStatus === 'failed' && !isBrowserFallback && !isRootNotSet;
     const openDebug = buildOpenDraftDebugPayload(draftResult);
+    const replacementReport = draftResult.replacementReport;
+    const unresolvedPlaceholders = replacementReport?.unresolved || [];
+    const groupedUnresolved = groupReplacementIssues(unresolvedPlaceholders);
+    const nonReplacementWarnings = (draftResult.warnings || [])
+      .filter((warning) => !/placeholder\(s\) still need manual review/i.test(warning));
 
     return (
       <Modal isOpen onClose={handleCloseDone} title="Draft Created" size="md">
@@ -788,9 +929,35 @@ function DraftModal({ template, onClose, onCreated }) {
             <div><span>Template</span><strong>{template.title || template.name}</strong></div>
           </div>
 
-          {draftResult.warnings?.length > 0 && (
+          {replacementReport && unresolvedPlaceholders.length === 0 && (
+            <p className="templates__open-status templates__open-status--ok">
+              All detected placeholders were replaced.
+            </p>
+          )}
+
+          {replacementReport && unresolvedPlaceholders.length > 0 && (
+            <div className="templates__draft-warnings templates__draft-warnings--review">
+              <p className="templates__draft-warning-title">
+                {unresolvedPlaceholders.length} placeholder{unresolvedPlaceholders.length !== 1 ? 's' : ''} still need manual review:
+              </p>
+              {Object.entries(groupedUnresolved).map(([reason, items]) => (
+                <div key={reason} className="templates__draft-warning-group">
+                  <strong>{reason}</strong>
+                  <ul>
+                    {items.slice(0, 8).map((item) => (
+                      <li key={`${item.part}-${item.placeholder}`}>
+                        {formatUnresolvedPlaceholder(item)}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {nonReplacementWarnings.length > 0 && (
             <div className="templates__draft-warnings">
-              {draftResult.warnings.map((w, i) => (
+              {nonReplacementWarnings.map((w, i) => (
                 <p key={i} className="templates__draft-warning">⚠️ {w}</p>
               ))}
             </div>
@@ -1096,7 +1263,7 @@ function PreviewModal({ template, onClose, onUse }) {
           <div><span>Category</span><strong>{template.category || '—'}</strong></div>
           <div><span>File Type</span><strong>{(template.extension || '').toUpperCase() || '—'}</strong></div>
           <div><span>File Size</span><strong>{formatBytes(template.fileSize) || '—'}</strong></div>
-          <div><span>Source</span><strong>{template.sourcePath || '—'}</strong></div>
+          <div><span>Source</span><strong>{template.relativePath || template.sourcePath || '—'}</strong></div>
           <div><span>Last Updated</span><strong>{formatDate(template.updatedAt)}</strong></div>
         </div>
 
@@ -1235,10 +1402,19 @@ export default function Templates() {
   // Load folder capability status on mount
   useEffect(() => {
     let cancelled = false;
+    const unsubscribe = subscribeToDesktopLifecycleIndex();
+    syncLifecycleIndexFromDesktop()
+      .then(() => {
+        if (!cancelled) setLocalData(collectLocalTemplates());
+      })
+      .catch(() => {});
     getLegalFolderStatus().then((s) => {
       if (!cancelled) setFolderStatus(s);
     }).catch(() => {});
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   // Refresh local data and folder status whenever the Legal Folder changes
@@ -1311,6 +1487,21 @@ export default function Templates() {
       setReauthingBanner(false);
     }
   };
+
+  const handleUseTemplate = useCallback((template) => {
+    const debug = getTemplateFileDebugInfo(template);
+    if (import.meta.env.DEV) {
+      console.info('[Templates] Use clicked', {
+        ...debug,
+        resolverStrategy: debug.hasElectronFileReader
+          ? 'electron'
+          : debug.isDesktop
+            ? 'none'
+            : 'indexeddb',
+      });
+    }
+    setDraftTemplate(template);
+  }, []);
 
   const noFolder = !source;
   const noTemplates = source && allTemplates.length === 0;
@@ -1428,7 +1619,7 @@ export default function Templates() {
                 key={t._id}
                 template={t}
                 onPreview={() => setPreviewTemplate(t)}
-                onUse={() => setDraftTemplate(t)}
+                onUse={() => handleUseTemplate(t)}
               />
             ))}
           </div>
@@ -1439,7 +1630,7 @@ export default function Templates() {
         <PreviewModal
           template={previewTemplate}
           onClose={() => setPreviewTemplate(null)}
-          onUse={(t) => setDraftTemplate(t)}
+          onUse={handleUseTemplate}
         />
       )}
 

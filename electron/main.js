@@ -8,6 +8,12 @@ const {
   getSafeLegalFolderMetadata,
   openDraftWithDesktopStrategy,
 } = require('./openDraftCore');
+const {
+  readLegalFolderFileFromRoot,
+  safeReadLegalFolderFilePayload,
+} = require('./readLegalFolderFileCore');
+const { LegalFolderLifecycleIndex } = require('./services/legalFolderLifecycleIndex');
+const { LegalFolderLifecycleWatcher } = require('./services/legalFolderLifecycleWatcher');
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -17,11 +23,17 @@ let legalFolderRoot = null;
 
 // Top-level reference prevents GC before the window finishes loading.
 let mainWindow = null;
+let lifecycleIndex = new LegalFolderLifecycleIndex();
+let lifecycleWatcher = null;
 
 const PRELOAD_PATH = path.join(__dirname, 'preload.js');
 
 function getDesktopConfigPath() {
   return path.join(app.getPath('userData'), 'contractiq-desktop-config.json');
+}
+
+function getLifecycleIndexPath() {
+  return path.join(app.getPath('userData'), 'contractiq-legal-folder-index.json');
 }
 
 function loadDesktopConfig() {
@@ -42,6 +54,46 @@ function loadDesktopConfig() {
     });
   } catch (err) {
     console.warn('[electron] desktop config load failed', {
+      code: err?.code || null,
+      message: err?.message || String(err),
+    });
+  }
+}
+
+function loadLifecycleIndex() {
+  try {
+    const indexPath = getLifecycleIndexPath();
+    if (!fs.existsSync(indexPath)) {
+      console.info('[electron:lifecycle] local index not found', { indexPath });
+      lifecycleIndex = new LegalFolderLifecycleIndex();
+      return;
+    }
+    const parsed = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    lifecycleIndex = new LegalFolderLifecycleIndex(Array.isArray(parsed.files) ? parsed.files : []);
+    console.info('[electron:lifecycle] local index loaded', {
+      indexPath,
+      fileCount: lifecycleIndex.getAllFiles().length,
+    });
+  } catch (err) {
+    lifecycleIndex = new LegalFolderLifecycleIndex();
+    console.warn('[electron:lifecycle] local index load failed', {
+      code: err?.code || null,
+      message: err?.message || String(err),
+    });
+  }
+}
+
+function saveLifecycleIndex() {
+  try {
+    const indexPath = getLifecycleIndexPath();
+    fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+    fs.writeFileSync(indexPath, JSON.stringify(lifecycleIndex.toJSON(), null, 2), 'utf8');
+    console.info('[electron:lifecycle] local index saved', {
+      indexPath,
+      fileCount: lifecycleIndex.getAllFiles().length,
+    });
+  } catch (err) {
+    console.warn('[electron:lifecycle] local index save failed', {
       code: err?.code || null,
       message: err?.message || String(err),
     });
@@ -75,6 +127,127 @@ function legalFolderStatusPayload() {
     includeDebugRoot: isDev,
     pathModule: path,
   });
+}
+
+function lifecycleStatusPayload(extra = {}) {
+  const status = legalFolderStatusPayload();
+  const scopedIndex = status.sourceId ? lifecycleIndex.toJSON(status.sourceId) : { files: [], summary: lifecycleIndex.summary() };
+  return {
+    ok: true,
+    ...status,
+    name: status.rootName,
+    files: scopedIndex.files,
+    summary: scopedIndex.summary,
+    eventType: extra.eventType || null,
+    notification: extra.notification || null,
+    live: Boolean(extra.live),
+  };
+}
+
+function hasSignedLikePath(record) {
+  return /\b(signed|executed|completed|sign)\b/i.test(
+    String(record?.relativePath || record?.displayPath || record?.fileName || '').replace(/[_-]/g, ' ')
+  );
+}
+
+function lifecycleIpcDiagnostics(payload) {
+  const files = Array.isArray(payload?.files) ? payload.files : [];
+  const signed = files.filter((file) => file.lifecycleStage === 'SIGNED');
+  const unknown = files.filter((file) => file.lifecycleStage === 'UNKNOWN');
+  return {
+    totalFiles: files.length,
+    signedCount: signed.length,
+    unknownCount: unknown.length,
+    sampleSigned: signed.slice(0, 5).map((file) => ({
+      fileName: file.fileName,
+      relativePath: file.relativePath,
+      lifecycleStage: file.lifecycleStage,
+      reason: file.reason || null,
+      matchedSegment: file.matchedSegment || null,
+    })),
+    sampleUnknown: unknown.slice(0, 5).map((file) => ({
+      fileName: file.fileName,
+      relativePath: file.relativePath,
+      lifecycleStage: file.lifecycleStage,
+      reason: file.reason || null,
+      matchedSegment: file.matchedSegment || null,
+    })),
+    signedLikeUnknown: unknown
+      .filter(hasSignedLikePath)
+      .slice(0, 10)
+      .map((file) => ({
+        fileName: file.fileName,
+        relativePath: file.relativePath,
+        lifecycleStage: file.lifecycleStage,
+        reason: file.reason || null,
+        matchedSegment: file.matchedSegment || null,
+      })),
+  };
+}
+
+function emitLifecycleUpdate(payload) {
+  const safePayload = payload || lifecycleStatusPayload();
+  console.info('[electron:lifecycle] update', {
+    eventType: safePayload.eventType,
+    live: safePayload.live,
+    summary: safePayload.summary,
+    notification: safePayload.notification || null,
+  });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('desktop:lifecycleUpdated', safePayload);
+  }
+}
+
+async function startLegalFolderLifecycleWatcher(reason = 'startup') {
+  if (!legalFolderRoot) {
+    console.info('[electron:lifecycle] watcher not started; no Legal Folder root', { reason });
+    return lifecycleStatusPayload();
+  }
+
+  const status = legalFolderStatusPayload();
+  const sourceId = status.sourceId;
+  if (lifecycleWatcher) {
+    lifecycleWatcher.stop();
+    lifecycleWatcher = null;
+  }
+
+  lifecycleWatcher = new LegalFolderLifecycleWatcher({
+    rootPath: legalFolderRoot,
+    sourceId,
+    index: lifecycleIndex,
+    fsModule: fs,
+    pathModule: path,
+    logger: console,
+    onUpdate: (payload) => {
+      const merged = {
+        ...lifecycleStatusPayload(payload),
+        files: payload.files,
+        summary: payload.summary,
+        eventType: payload.eventType,
+        notification: payload.notification,
+        live: payload.live,
+      };
+      saveLifecycleIndex();
+      emitLifecycleUpdate(merged);
+    },
+    onNotification: (notification) => {
+      console.info('[electron:lifecycle] notification', notification);
+    },
+  });
+
+  console.info('[electron:lifecycle] starting watcher', {
+    reason,
+    sourceId,
+    rootName: path.basename(legalFolderRoot),
+  });
+  return lifecycleWatcher.start();
+}
+
+function stopLegalFolderLifecycleWatcher() {
+  if (lifecycleWatcher) {
+    lifecycleWatcher.stop();
+    lifecycleWatcher = null;
+  }
 }
 
 function safeOpenDraftPayload(payload = {}) {
@@ -148,7 +321,14 @@ function createWindow() {
 
 app.whenReady().then(() => {
   loadDesktopConfig();
+  loadLifecycleIndex();
   createWindow();
+  startLegalFolderLifecycleWatcher('app_ready').catch((err) => {
+    console.warn('[electron:lifecycle] startup scan failed', {
+      code: err?.code || null,
+      message: err?.message || String(err),
+    });
+  });
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -160,6 +340,7 @@ app.whenReady().then(() => {
 // safe to address as a follow-up.
 
 app.on('window-all-closed', () => {
+  stopLegalFolderLifecycleWatcher();
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -203,10 +384,12 @@ ipcMain.handle('desktop:chooseLegalFolder', async (event) => {
   }
   legalFolderRoot = path.resolve(result.filePaths[0]);
   saveDesktopConfig();
+  const lifecycle = await startLegalFolderLifecycleWatcher('chooseLegalFolder');
   const status = legalFolderStatusPayload();
   const response = {
     ...status,
     name: status.rootName,
+    lifecycleSummary: lifecycle.summary,
   };
   console.info('[electron] desktop:chooseLegalFolder result', response);
   return response;
@@ -222,6 +405,87 @@ ipcMain.handle('desktop:getLegalFolderRoot', () => {
   };
   console.info('[electron] desktop:getLegalFolderRoot', response);
   return response;
+});
+
+// ── IPC: read a file inside the selected Legal Folder ────────────────────────
+
+ipcMain.handle('desktop:readLegalFolderFile', async (_event, payload = {}) => {
+  console.info('[electron:readLegalFolderFile] payload received', safeReadLegalFolderFilePayload(payload));
+  const result = await readLegalFolderFileFromRoot(payload, {
+    legalFolderRoot,
+    fsModule: fs,
+    pathModule: path,
+    logger: console,
+  });
+  console.info('[electron:readLegalFolderFile] result', {
+    ok: result?.ok,
+    code: result?.code || null,
+    fileName: result?.fileName || null,
+    extension: result?.extension || null,
+    relativePath: result?.relativePath || payload?.relativePath || null,
+    bytes: result?.arrayBuffer?.byteLength || null,
+  });
+  return result;
+});
+
+// ── IPC: Legal Folder lifecycle index ────────────────────────────────────────
+
+ipcMain.handle('desktop:getLifecycleIndex', () => {
+  const response = lifecycleStatusPayload();
+  console.info('[electron:lifecycle] desktop:getLifecycleIndex', {
+    hasRoot: response.hasRoot,
+    rootName: response.rootName,
+    summary: response.summary,
+  });
+  if (isDev) {
+    console.info('[electron:lifecycle] desktop:getLifecycleIndex diagnostics', lifecycleIpcDiagnostics(response));
+  }
+  return response;
+});
+
+ipcMain.handle('desktop:rescanLegalFolderLifecycle', async () => {
+  console.info('[electron:lifecycle] desktop:rescanLegalFolderLifecycle called');
+  if (!legalFolderRoot) {
+    const response = lifecycleStatusPayload({
+      eventType: 'scan',
+      notification: null,
+      live: false,
+    });
+    console.info('[electron:lifecycle] rescan skipped; no root', response.summary);
+    return response;
+  }
+  if (!lifecycleWatcher) {
+    return startLegalFolderLifecycleWatcher('manual_rescan');
+  }
+  const payload = await lifecycleWatcher.fullScan({ notify: false });
+  return {
+    ...lifecycleStatusPayload(payload),
+    files: payload.files,
+    summary: payload.summary,
+    eventType: payload.eventType,
+    live: payload.live,
+  };
+});
+
+ipcMain.handle('desktop:disconnectLegalFolder', () => {
+  console.info('[electron:lifecycle] desktop:disconnectLegalFolder called');
+  const previousStatus = legalFolderStatusPayload();
+  stopLegalFolderLifecycleWatcher();
+  if (previousStatus.sourceId) lifecycleIndex.clearIndexForSource(previousStatus.sourceId);
+  else lifecycleIndex.clearIndexForSource();
+  legalFolderRoot = null;
+  saveDesktopConfig();
+  saveLifecycleIndex();
+  const response = lifecycleStatusPayload({
+    eventType: 'disconnect',
+    notification: null,
+    live: true,
+  });
+  emitLifecycleUpdate(response);
+  return {
+    ...response,
+    message: 'Legal Folder disconnected locally. Files on disk were not changed.',
+  };
 });
 
 // ── IPC: open draft ───────────────────────────────────────────────────────────
