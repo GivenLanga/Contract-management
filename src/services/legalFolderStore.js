@@ -679,6 +679,14 @@ export const clearLegalFolderImport = () => {
   emitUpdate();
 };
 
+export const addDocumentToLegalFolderImport = (doc) => {
+  const source = fromStorage(SOURCE_KEY, null);
+  if (!source || source.importerVersion !== IMPORTER_VERSION) return;
+  const existing = fromStorage(DOCUMENTS_KEY, []);
+  toStorage(DOCUMENTS_KEY, [...existing.filter((d) => d._id !== doc._id), doc]);
+  emitUpdate();
+};
+
 export const getContractsForApp = () => {
   const importedContracts = getLegalFolderImport().contracts;
   return importedContracts.length ? importedContracts : mockContracts;

@@ -384,12 +384,11 @@ router.post('/:id/draft', protect, async (req, res) => {
     // Legal Folder templates must be drafted client-side — the server does not hold
     // the file and should not be asked to create drafts for them.
     if (template.sourceKind === 'LEGAL_FOLDER_SYNC') {
-      return res.status(410).json({
-        code: 'DRAFT_CLIENT_SIDE',
+      return res.status(409).json({
+        code: 'CLIENT_SIDE_LEGAL_FOLDER_DRAFT_REQUIRED',
         message:
-          'This template is sourced from a connected Legal Folder. ' +
-          'Drafts are created directly in the browser from the cached template file. ' +
-          'Use the "Use" button on the Templates page to create a draft.',
+          'Drafts from Legal Folder templates must be created in the connected Legal Folder by the client. ' +
+          'Use the "Use" button on the Templates page to create a draft directly in your Legal Folder.',
         actions: [
           'Open the Templates page and click Use on this template.',
           'Ensure the Legal Folder is connected and synced so the file is cached.',

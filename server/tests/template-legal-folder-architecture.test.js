@@ -24,21 +24,21 @@ const routeSrc = fs.readFileSync(
   'utf8'
 );
 
-test('draft route: returns 410 for LEGAL_FOLDER_SYNC templates', () => {
+test('draft route: returns 409 for LEGAL_FOLDER_SYNC templates', () => {
   assert.ok(
     routeSrc.includes("sourceKind === 'LEGAL_FOLDER_SYNC'"),
     'Draft route must check sourceKind === LEGAL_FOLDER_SYNC'
   );
   assert.ok(
-    routeSrc.includes('res.status(410)'),
-    'Draft route must return 410 for LEGAL_FOLDER_SYNC templates'
+    routeSrc.includes('res.status(409)'),
+    'Draft route must return 409 for LEGAL_FOLDER_SYNC templates'
   );
 });
 
-test('draft route: LEGAL_FOLDER_SYNC response includes DRAFT_CLIENT_SIDE code', () => {
+test('draft route: LEGAL_FOLDER_SYNC response includes CLIENT_SIDE_LEGAL_FOLDER_DRAFT_REQUIRED code', () => {
   assert.ok(
-    routeSrc.includes("code: 'DRAFT_CLIENT_SIDE'"),
-    'Response code must be DRAFT_CLIENT_SIDE to distinguish from TEMPLATE_FILE_UNAVAILABLE'
+    routeSrc.includes("code: 'CLIENT_SIDE_LEGAL_FOLDER_DRAFT_REQUIRED'"),
+    'Response code must be CLIENT_SIDE_LEGAL_FOLDER_DRAFT_REQUIRED'
   );
 });
 
@@ -239,12 +239,18 @@ test('frontend: templateDocumentScanner.js detects blank form fields', () => {
   assert.ok(src.includes('DESIGNATION'), 'Scanner groups must cover DESIGNATION as a signature field');
 });
 
-test('frontend: legalFolderPathBuilder.js exists and exports buildDraftPath', () => {
+test('frontend: legalFolderPathBuilder.js exists and exports required functions', () => {
   const filePath = path.join(ROOT, 'legalFolderPathBuilder.js');
   assert.ok(fs.existsSync(filePath), 'legalFolderPathBuilder.js must exist');
   const src = fs.readFileSync(filePath, 'utf8');
   assert.ok(src.includes('export function buildDraftPath'), 'Must export buildDraftPath');
   assert.ok(src.includes('export async function writeToLegalFolder'), 'Must export writeToLegalFolder');
+  assert.ok(src.includes('export async function buildDraftDestination'), 'Must export buildDraftDestination');
+  assert.ok(src.includes('export async function writeDraftToFolder'), 'Must export writeDraftToFolder');
+  assert.ok(src.includes('export function mapAgreementFamilyToFolder'), 'Must export mapAgreementFamilyToFolder');
+  assert.ok(src.includes('export async function getExistingCategoryFolders'), 'Must export getExistingCategoryFolders');
+  assert.ok(src.includes('export async function ensureDirectoryPath'), 'Must export ensureDirectoryPath');
+  assert.ok(src.includes('export async function resolveDraftFileName'), 'Must export resolveDraftFileName');
 });
 
 test('frontend: legalFolderPathBuilder.js builds Contracts/{year}/{category}/{counterparty}/Drafts path', () => {
@@ -384,21 +390,29 @@ test('Templates.jsx: DraftModal uses createDraftDocx for client-side draft creat
   );
 });
 
-test('Templates.jsx: DraftModal attempts write-back to Legal Folder', () => {
+test('Templates.jsx: DraftModal writes directly to Legal Folder via buildDraftDestination', () => {
   assert.ok(
-    templatesSrc.includes('writeToLegalFolder'),
-    'DraftModal must attempt to write the draft back into the Legal Folder'
+    templatesSrc.includes('buildDraftDestination'),
+    'DraftModal must use buildDraftDestination to create directories and resolve the write location'
+  );
+  assert.ok(
+    templatesSrc.includes('writeDraftToFolder'),
+    'DraftModal must use writeDraftToFolder to write the DOCX directly into the Legal Folder'
   );
   assert.ok(
     templatesSrc.includes('getLegalFolderHandle'),
-    'DraftModal must use the stored directory handle for write-back'
+    'DraftModal must check the stored directory handle before attempting to write'
   );
 });
 
-test('Templates.jsx: DraftModal falls back to download when write-back fails', () => {
+test('Templates.jsx: DraftModal shows reconnect message instead of OS save dialog when handle missing', () => {
   assert.ok(
-    templatesSrc.includes('downloadDraft'),
-    'DraftModal must fall back to download if write-back is unavailable'
+    templatesSrc.includes('no-handle'),
+    'DraftModal must enter a no-handle phase when the Legal Folder handle is not available'
+  );
+  assert.ok(
+    templatesSrc.includes('Legal Folder Not Connected') || templatesSrc.includes('no-handle'),
+    'DraftModal must show a reconnect message — not an OS save dialog — when handle is missing'
   );
 });
 
@@ -477,5 +491,140 @@ test('acceptance: writeToLegalFolder never creates directories above root', () =
   assert.ok(
     !src.includes("'..'"),
     'Must never navigate to parent directories'
+  );
+});
+
+// ── New category mapping tests (correct folder names per spec) ────────────────
+
+test('path builder: ONCE_OFF_SERVICE_AGREEMENT prefers Service Providers', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'legalFolderPathBuilder.js'), 'utf8');
+  assert.ok(
+    src.includes("'Service Providers'"),
+    "ONCE_OFF_SERVICE_AGREEMENT must include 'Service Providers' as a preferred folder name"
+  );
+  assert.ok(
+    src.includes('ONCE_OFF_SERVICE_AGREEMENT'),
+    'Must map ONCE_OFF_SERVICE_AGREEMENT'
+  );
+});
+
+test('path builder: NDA prefers Confidentiality folder', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'legalFolderPathBuilder.js'), 'utf8');
+  assert.ok(
+    src.includes("'Confidentiality'"),
+    "NDA must include 'Confidentiality' as a preferred folder name"
+  );
+});
+
+test('path builder: FUNDING_LOAN_AGREEMENT prefers Funding Loan Agreement folder', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'legalFolderPathBuilder.js'), 'utf8');
+  assert.ok(
+    src.includes("'Funding Loan Agreement'"),
+    "FUNDING_LOAN_AGREEMENT must include 'Funding Loan Agreement' as a preferred folder name"
+  );
+});
+
+test('path builder: mapAgreementFamilyToFolder checks existing folder names first', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'legalFolderPathBuilder.js'), 'utf8');
+  assert.ok(
+    src.includes('existingFolders'),
+    'mapAgreementFamilyToFolder must accept and check existingFolders parameter'
+  );
+  assert.ok(
+    src.includes('lowerExisting'),
+    'Must perform case-insensitive comparison against existing folder names'
+  );
+});
+
+test('path builder: buildDraftDestination creates Final and Signed sibling folders', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'legalFolderPathBuilder.js'), 'utf8');
+  assert.ok(
+    src.includes("getDirectoryHandle('Final'"),
+    "buildDraftDestination must create a 'Final' sibling folder"
+  );
+  assert.ok(
+    src.includes("getDirectoryHandle('Signed'"),
+    "buildDraftDestination must create a 'Signed' sibling folder"
+  );
+});
+
+test('path builder: buildDraftDestination uses getExistingCategoryFolders to detect existing structure', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'legalFolderPathBuilder.js'), 'utf8');
+  assert.ok(
+    src.includes('getExistingCategoryFolders(rootHandle)'),
+    'buildDraftDestination must call getExistingCategoryFolders to read existing Legal Folder structure'
+  );
+});
+
+// ── Templates.jsx: local index update ────────────────────────────────────────
+
+test('Templates.jsx: DraftModal updates local Legal Folder index after draft creation', () => {
+  assert.ok(
+    templatesSrc.includes('addDocumentToLegalFolderImport'),
+    'DraftModal must call addDocumentToLegalFolderImport to update the local index'
+  );
+});
+
+test('Templates.jsx: DraftModal requires counterparty before creating draft', () => {
+  assert.ok(
+    templatesSrc.includes('counterparty.trim()'),
+    'DraftModal must validate that counterparty is not empty'
+  );
+});
+
+test('Templates.jsx: DraftModal shows live destination preview', () => {
+  assert.ok(
+    templatesSrc.includes('destinationPreview'),
+    'DraftModal must compute and show a live destination preview'
+  );
+  assert.ok(
+    templatesSrc.includes('Enter a counterparty to determine the draft folder'),
+    'Preview must prompt user to enter counterparty when field is empty'
+  );
+});
+
+// ── legalFolderStore: addDocumentToLegalFolderImport ─────────────────────────
+
+test('legalFolderStore.js: exports addDocumentToLegalFolderImport', () => {
+  const storeSrc = fs.readFileSync(
+    path.join(__dirname, '../../src/services/legalFolderStore.js'),
+    'utf8'
+  );
+  assert.ok(
+    storeSrc.includes('export const addDocumentToLegalFolderImport'),
+    'legalFolderStore must export addDocumentToLegalFolderImport for draft index updates'
+  );
+  assert.ok(
+    storeSrc.includes('DOCUMENTS_KEY'),
+    'addDocumentToLegalFolderImport must update the DOCUMENTS_KEY in localStorage'
+  );
+});
+
+// ── Regression: no save dialog ────────────────────────────────────────────────
+
+test('regression: Templates.jsx does not call downloadDraft in the submit path', () => {
+  // downloadDraft (anchor.download) must not be used as the primary draft creation path.
+  // The DraftModal writes directly to the connected Legal Folder via writeDraftToFolder.
+  assert.ok(
+    !templatesSrc.includes('downloadDraft(blob'),
+    'DraftModal must not call downloadDraft(blob, ...) — drafts must be written to Legal Folder'
+  );
+});
+
+test('regression: Templates.jsx does not use showSaveFilePicker', () => {
+  assert.ok(
+    !templatesSrc.includes('showSaveFilePicker'),
+    'DraftModal must not use showSaveFilePicker — no OS save dialog allowed'
+  );
+});
+
+test('regression: backend LEGAL_FOLDER_SYNC draft route does not write server files', () => {
+  const legalFolderBlock = routeSrc.slice(
+    routeSrc.indexOf("sourceKind === 'LEGAL_FOLDER_SYNC'"),
+    routeSrc.indexOf("sourceKind === 'LEGAL_FOLDER_SYNC'") + 600
+  );
+  assert.ok(
+    !legalFolderBlock.includes('uploads/generated-drafts') && !legalFolderBlock.includes('copyFileSync'),
+    'LEGAL_FOLDER_SYNC draft block must not write to uploads/generated-drafts on server'
   );
 });

@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   buildLegalFolderImport,
   clearLegalFolderImport,
@@ -11,7 +11,13 @@ import {
 import { clearLegalFolderFiles, replaceLegalFolderFiles } from '../../services/legalFolderFileStore';
 import { syncLegalFolderRagIndex } from '../../services/legalFolderRagSync';
 import { templates as templatesApi } from '../../services/api';
-import { setLegalFolderHandle, clearLegalFolderHandle } from '../../services/legalFolderHandle';
+import {
+  setLegalFolderHandle,
+  clearLegalFolderHandle,
+  saveHandleToIndexedDB,
+  clearHandleFromIndexedDB,
+} from '../../services/legalFolderHandle';
+import { getLegalFolderStatus, FOLDER_STATE } from '../../services/legalFolderAccess';
 import './LegalFolder.css';
 
 export default function LegalFolder() {
@@ -25,6 +31,16 @@ export default function LegalFolder() {
   const [source, setSource] = useState(initialSnapshot.source || null);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
+  const [writeStatus, setWriteStatus] = useState(null);
+
+  // Check write access status on mount and whenever the source changes
+  useEffect(() => {
+    let cancelled = false;
+    getLegalFolderStatus().then((s) => {
+      if (!cancelled) setWriteStatus(s);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [source]);
 
   const applySnapshot = (snapshot) => {
     setDocs(snapshot.documents || []);
@@ -58,6 +74,8 @@ export default function LegalFolder() {
         // readwrite mode enables draft write-back into the connected Legal Folder
         const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
         setLegalFolderHandle(directoryHandle);
+        // Persist the handle so drafts can be saved after page reload
+        await saveHandleToIndexedDB(directoryHandle);
         const entries = await collectFilesFromDirectoryHandle(directoryHandle);
         await syncEntries(entries, directoryHandle.name);
       } else {
@@ -84,6 +102,8 @@ export default function LegalFolder() {
 
     try {
       if (entries.length) {
+        // File input path — no directory handle available (browser limitation)
+        // Index is built but write-back will require re-authorization
         await syncEntries(entries, sourceName);
       }
     } catch (error) {
@@ -99,13 +119,14 @@ export default function LegalFolder() {
   const handleDisconnect = async () => {
     const sourceId = source?.name || null;
 
-    // Clear local state and directory handle first so the UI responds immediately
     clearLegalFolderImport();
     clearLegalFolderHandle();
+    clearHandleFromIndexedDB().catch(() => {});
     clearLegalFolderFiles().catch(() => {});
     setDocs([]);
     setTotal(0);
     setSource(null);
+    setWriteStatus(null);
     setSyncError('');
     setDisconnectMsg('');
 
@@ -140,6 +161,22 @@ export default function LegalFolder() {
     if (bytes < 1048576) return `${(bytes / 1024).toFixed(0)} KB`;
     return `${(bytes / 1048576).toFixed(1)} MB`;
   };
+
+  const writeStatusLabel = () => {
+    if (!writeStatus || !source) return null;
+    switch (writeStatus.state) {
+      case FOLDER_STATE.WRITE_READY:
+        return { text: 'Read/write access active', color: '#166534' };
+      case FOLDER_STATE.WRITE_REAUTH_REQUIRED:
+        return { text: 'Write access not granted — re-authorize to save drafts', color: '#92400e' };
+      case FOLDER_STATE.UNSUPPORTED_BROWSER:
+        return { text: 'Indexed for viewing only — browser does not support direct folder write access', color: '#92400e' };
+      default:
+        return null;
+    }
+  };
+
+  const wsLabel = writeStatusLabel();
 
   return (
     <div className="legal-folder">
@@ -203,6 +240,11 @@ export default function LegalFolder() {
                 <span>{source.skippedFileCount} skipped</span>
               )}
               <span>Last sync {new Date(source.syncedAt).toLocaleString()}</span>
+              {wsLabel && (
+                <span style={{ color: wsLabel.color, fontWeight: 600 }}>
+                  {wsLabel.text}
+                </span>
+              )}
             </>
           )}
         </div>
