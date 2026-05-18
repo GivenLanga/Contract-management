@@ -111,4 +111,40 @@ contextBridge.exposeInMainWorld('contractiq', {
     console.info('[contractiq preload] openDraft result', result);
     return result;
   },
+
+  // ── Legal Tracker ───────────────────────────────────────────────────────────
+  trackerGetStatus: async () => {
+    return ipcRenderer.invoke('tracker:getStatus');
+  },
+  trackerChooseFile: async () => {
+    console.info('[contractiq preload] trackerChooseFile called');
+    return ipcRenderer.invoke('tracker:chooseFile');
+  },
+  trackerSync: async () => {
+    console.info('[contractiq preload] trackerSync called');
+    return ipcRenderer.invoke('tracker:syncTracker');
+  },
+  trackerUpdateRow: async (args) => {
+    return ipcRenderer.invoke('tracker:updateRow', args);
+  },
+  trackerOpenFile: async () => {
+    return ipcRenderer.invoke('tracker:openFile');
+  },
+  trackerDisconnect: async () => {
+    console.info('[contractiq preload] trackerDisconnect called');
+    return ipcRenderer.invoke('tracker:disconnectTracker');
+  },
+  onTrackerFileChanged: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    const listener = (_event, payload) => {
+      console.info('[contractiq preload] tracker:fileChanged received', {
+        ok: payload?.ok,
+        code: payload?.code,
+        rowsImported: payload?.rowsImported,
+      });
+      callback(payload);
+    };
+    ipcRenderer.on('tracker:fileChanged', listener);
+    return () => ipcRenderer.removeListener('tracker:fileChanged', listener);
+  },
 });

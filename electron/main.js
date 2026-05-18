@@ -14,12 +14,19 @@ const {
 } = require('./readLegalFolderFileCore');
 const { LegalFolderLifecycleIndex } = require('./services/legalFolderLifecycleIndex');
 const { LegalFolderLifecycleWatcher } = require('./services/legalFolderLifecycleWatcher');
+const trackerService = require('./services/legalTrackerWorkbookService');
 
 const isDev = process.env.NODE_ENV === 'development';
 
 // Main-process Legal Folder root path. It is persisted locally, used for
 // desktop file operations, and never exposed to React except as dev-only debug.
 let legalFolderRoot = null;
+
+// Legal Tracker state — never expose absolutePath to renderer
+let trackerAbsolutePath = null;
+let trackerColumnMapping = {};
+let trackerFileWatcher   = null;
+let trackerDebounceTimer = null;
 
 // Top-level reference prevents GC before the window finishes loading.
 let mainWindow = null;
@@ -322,7 +329,9 @@ function createWindow() {
 app.whenReady().then(() => {
   loadDesktopConfig();
   loadLifecycleIndex();
+  loadTrackerConfig();
   createWindow();
+  if (trackerAbsolutePath) startTrackerWatcher();
   startLegalFolderLifecycleWatcher('app_ready').catch((err) => {
     console.warn('[electron:lifecycle] startup scan failed', {
       code: err?.code || null,
@@ -341,6 +350,7 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   stopLegalFolderLifecycleWatcher();
+  stopTrackerWatcher();
   if (process.platform !== 'darwin') app.quit();
 });
 
@@ -508,6 +518,185 @@ ipcMain.handle('desktop:openDraft', async (_event, payload = {}) => {
     shellOpenPath: (absolutePath) => shell.openPath(absolutePath),
     logger: console,
   });
+});
+
+// ── Legal Tracker config helpers ──────────────────────────────────────────────
+
+function getTrackerConfigPath() {
+  return path.join(app.getPath('userData'), 'contractiq-tracker-config.json');
+}
+
+function loadTrackerConfig() {
+  try {
+    const p = getTrackerConfigPath();
+    if (!fs.existsSync(p)) return;
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (typeof parsed.absolutePath === 'string' && parsed.absolutePath.endsWith('.xlsx')) {
+      trackerAbsolutePath  = path.resolve(parsed.absolutePath);
+      trackerColumnMapping = parsed.columnMapping || {};
+      console.info('[tracker] config loaded', { hasPath: true, name: path.basename(trackerAbsolutePath) });
+    }
+  } catch (err) {
+    console.warn('[tracker] config load failed', err.message);
+  }
+}
+
+function saveTrackerConfig() {
+  try {
+    const p = getTrackerConfigPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({
+      absolutePath:  trackerAbsolutePath,
+      columnMapping: trackerColumnMapping,
+    }, null, 2), 'utf8');
+  } catch (err) {
+    console.warn('[tracker] config save failed', err.message);
+  }
+}
+
+function clearTrackerConfig() {
+  trackerAbsolutePath  = null;
+  trackerColumnMapping = {};
+  try { fs.unlinkSync(getTrackerConfigPath()); } catch {}
+}
+
+function safeTrackerStatus() {
+  if (!trackerAbsolutePath) return { connected: false };
+  const exists = fs.existsSync(trackerAbsolutePath);
+  return {
+    connected:    true,
+    workbookName: path.basename(trackerAbsolutePath, '.xlsx'),
+    watchStatus:  exists ? (trackerFileWatcher ? 'watching' : 'needs_resync') : 'missing_file',
+    absolutePath: isDev ? trackerAbsolutePath : undefined,
+  };
+}
+
+function startTrackerWatcher() {
+  stopTrackerWatcher();
+  if (!trackerAbsolutePath || !fs.existsSync(trackerAbsolutePath)) return;
+
+  try {
+    trackerFileWatcher = fs.watch(trackerAbsolutePath, (eventType) => {
+      if (eventType !== 'change') return;
+      clearTimeout(trackerDebounceTimer);
+      trackerDebounceTimer = setTimeout(async () => {
+        console.info('[tracker] file changed externally — re-importing');
+        const result = await trackerService.readWorkbook(trackerAbsolutePath);
+        if (result.ok) {
+          trackerColumnMapping = result.columnMapping;
+          saveTrackerConfig();
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('tracker:fileChanged', {
+              ok:           true,
+              workbookName: result.workbookName,
+              sheetName:    result.sheetName,
+              tasks:        result.tasks,
+              rowsImported: result.rowsImported,
+              warnings:     result.warnings,
+              lastSyncedAt: result.lastSyncedAt,
+            });
+          }
+        }
+      }, 800);
+    });
+    console.info('[tracker] watcher started', { name: path.basename(trackerAbsolutePath) });
+  } catch (err) {
+    console.warn('[tracker] watcher start failed', err.message);
+  }
+}
+
+function stopTrackerWatcher() {
+  clearTimeout(trackerDebounceTimer);
+  if (trackerFileWatcher) {
+    try { trackerFileWatcher.close(); } catch {}
+    trackerFileWatcher = null;
+  }
+}
+
+// ── Legal Tracker IPC handlers ────────────────────────────────────────────────
+
+ipcMain.handle('tracker:getStatus', () => safeTrackerStatus());
+
+ipcMain.handle('tracker:chooseFile', async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(win, {
+    title:   'Select Legal Tracker Spreadsheet',
+    filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }],
+    properties: ['openFile'],
+  });
+  if (result.canceled || !result.filePaths.length) {
+    return { ok: false, code: 'CANCELLED' };
+  }
+  const filePath = path.resolve(result.filePaths[0]);
+  const parsed   = await trackerService.readWorkbook(filePath);
+  if (!parsed.ok) return parsed;
+
+  trackerAbsolutePath  = filePath;
+  trackerColumnMapping = parsed.columnMapping;
+  saveTrackerConfig();
+  startTrackerWatcher();
+
+  return {
+    ok:           true,
+    workbookName: parsed.workbookName,
+    sheetName:    parsed.sheetName,
+    tasks:        parsed.tasks,
+    rowsImported: parsed.rowsImported,
+    warnings:     parsed.warnings,
+    lastSyncedAt: parsed.lastSyncedAt,
+    watchStatus:  'watching',
+    absolutePath: isDev ? filePath : undefined,
+  };
+});
+
+ipcMain.handle('tracker:syncTracker', async () => {
+  if (!trackerAbsolutePath) {
+    return { ok: false, code: 'NO_TRACKER', message: 'No Legal Tracker connected.' };
+  }
+  const result = await trackerService.readWorkbook(trackerAbsolutePath);
+  if (result.ok) {
+    trackerColumnMapping = result.columnMapping;
+    saveTrackerConfig();
+    startTrackerWatcher(); // restart watcher if it died
+  }
+  return result.ok ? {
+    ok:           true,
+    workbookName: result.workbookName,
+    sheetName:    result.sheetName,
+    tasks:        result.tasks,
+    rowsImported: result.rowsImported,
+    warnings:     result.warnings,
+    lastSyncedAt: result.lastSyncedAt,
+    watchStatus:  trackerFileWatcher ? 'watching' : 'needs_resync',
+  } : result;
+});
+
+ipcMain.handle('tracker:updateRow', async (_event, { rowNumber, fieldUpdates }) => {
+  if (!trackerAbsolutePath) {
+    return { ok: false, code: 'NO_TRACKER' };
+  }
+  return trackerService.updateRow(trackerAbsolutePath, {
+    rowNumber,
+    fieldUpdates,
+    columnMapping: trackerColumnMapping,
+  });
+});
+
+ipcMain.handle('tracker:openFile', async () => {
+  if (!trackerAbsolutePath || !fs.existsSync(trackerAbsolutePath)) {
+    return { ok: false, code: 'FILE_NOT_FOUND' };
+  }
+  const err = await shell.openPath(trackerAbsolutePath);
+  return err ? { ok: false, message: err } : { ok: true };
+});
+
+ipcMain.handle('tracker:disconnectTracker', () => {
+  stopTrackerWatcher();
+  clearTrackerConfig();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('tracker:fileChanged', { ok: false, code: 'DISCONNECTED' });
+  }
+  return { ok: true };
 });
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
