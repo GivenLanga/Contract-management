@@ -21,12 +21,9 @@ test('BackendKnowledgeRagService indexes curated help without exposing route sum
     router.get('/me', async () => {});
     module.exports = router;
   `);
-  writeFile(path.join(root, 'src/ai/config/legalWorkflowSla.js'), `
-    module.exports = {
-      INTERNAL_TURNAROUND_DAYS: 4,
-      EXTERNAL_TURNAROUND_DAYS: 7,
-      SIGNATURE_REMINDER_DAYS: 2,
-    };
+  writeFile(path.join(root, 'src/services/signingService.js'), `
+    const STATUSES = ['SENT', 'PARTIALLY_SIGNED', 'FULLY_SIGNED'];
+    module.exports = { STATUSES };
   `);
 
   const service = new BackendKnowledgeRagService({
@@ -42,11 +39,11 @@ test('BackendKnowledgeRagService indexes curated help without exposing route sum
   // Manager role gets curated help, not route internals.
   const result = await service.retrieve({
     user: { role: 'manager' },
-    query: 'What workflow SLA thresholds exist?',
+    query: 'How does the signing process work?',
   });
 
   const context = service.formatContext(result);
-  assert.match(context, /INTERNAL_TURNAROUND_DAYS=4/);
+  assert.match(context, /Signing statuses include/);
   assert.doesNotMatch(context, /do-not-index-this/);
   assert.doesNotMatch(context, /POST \/login/);
   assert.equal(result.snippets.every((snippet) => snippet.audience === 'help'), true);
@@ -93,8 +90,9 @@ test('BackendKnowledgeRagService keeps sanitized source chunks internal-only', a
 
 test('BackendKnowledgeRagService allows staff help but not source code', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'backend-rag-'));
-  writeFile(path.join(root, 'src/ai/config/legalWorkflowSla.js'), `
-    module.exports = { INTERNAL_TURNAROUND_DAYS: 4 };
+  writeFile(path.join(root, 'src/services/signingService.js'), `
+    const STATUSES = ['SENT', 'FULLY_SIGNED'];
+    module.exports = { STATUSES };
   `);
   writeFile(path.join(root, 'src/services/demoService.js'), `
     const implementationOnly = 'sourceOnlyMarker';
@@ -109,7 +107,7 @@ test('BackendKnowledgeRagService allows staff help but not source code', async (
 
   const help = await service.retrieve({
     user: { role: 'staff' },
-    query: 'internal turnaround days workflow SLA',
+    query: 'signing process statuses',
   });
   assert.equal(help.snippets.every((snippet) => snippet.audience === 'help'), true);
 

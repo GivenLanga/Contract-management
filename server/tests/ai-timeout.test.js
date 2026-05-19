@@ -198,16 +198,16 @@ test('chat() bypasses model for DB-dependent app-data queries', async () => {
     totalTimeoutMs: 500,
   });
   orch._handleToolCall = async (toolCall) => ({
-    type: 'workflow_summary',
-    title: 'Legal Requests',
+    type: 'task_summary',
+    title: 'Workflow Tasks',
     summary: `Direct tool selected: ${toolCall.toolName}.`,
     metrics: {},
     items: [],
   });
 
-  const result = await orch.chat(chatArgs('How many legal requests are currently in the system'));
+  const result = await orch.chat(chatArgs('Show unassigned workflow tasks'));
 
-  assert.equal(result.type, 'workflow_summary');
+  assert.equal(result.type, 'task_summary');
   assert.equal(generateCalled, false, 'Operational app-data queries must not call provider.generate');
 });
 

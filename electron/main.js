@@ -311,7 +311,7 @@ function createWindow() {
   // ── Load URL / file ───────────────────────────────────────────────────────
 
   if (isDev) {
-    const devURL = 'http://localhost:5173';
+    const devURL = process.env.ELECTRON_DEV_URL || 'http://localhost:5174';
     console.log('[electron] loading dev URL:', devURL);
     mainWindow.loadURL(devURL);
     mainWindow.webContents.openDevTools();
@@ -680,6 +680,14 @@ ipcMain.handle('tracker:updateRow', async (_event, { rowNumber, fieldUpdates }) 
     fieldUpdates,
     columnMapping: trackerColumnMapping,
   });
+});
+
+ipcMain.handle('tracker:readRow', async (_event, { rowNumber }) => {
+  if (!trackerAbsolutePath) return { ok: false, code: 'NO_TRACKER' };
+  const result = await trackerService.readWorkbook(trackerAbsolutePath);
+  if (!result.ok) return result;
+  const row = (result.tasks || []).find(t => t.rowNumber === rowNumber);
+  return row ? { ok: true, row } : { ok: false, code: 'ROW_NOT_FOUND' };
 });
 
 ipcMain.handle('tracker:openFile', async () => {

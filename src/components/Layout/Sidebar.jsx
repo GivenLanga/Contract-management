@@ -4,13 +4,12 @@ import { useNotifications } from '../../context/NotificationContext';
 import './Sidebar.css';
 
 const navItems = [
-  {
-    section: 'MAIN',
-    items: [
-      { to: '/',               label: 'Dashboard',       icon: '⊞', exact: true },
-      { to: '/legal-requests', label: 'Legal Requests',  icon: '⚖' },
-    ],
-  },
+	  {
+	    section: 'MAIN',
+	    items: [
+	      { to: '/',               label: 'Dashboard',       icon: '⊞', exact: true },
+	    ],
+	  },
   {
     section: 'CONTRACTS',
     items: [

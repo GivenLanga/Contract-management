@@ -48,11 +48,11 @@ function ItemBadges({ item }) {
 }
 
 function WorkflowItem({ item }) {
-  const title = item.title || item.name || item.documentName || item.legalRequestTitle || 'Untitled';
-  const id = item.id || item.contractId || item.legalRequestId || item._id || item.documentName || '—';
+  const title = item.title || item.name || item.documentName || 'Untitled';
+  const id = item.id || item.contractId || item._id || item.documentName || '—';
   const meta = [
     item.status?.replace(/_/g, ' '),
-    item.type || item.requestType || item.documentStage,
+    item.type || item.documentStage || item.sourceType,
     item.assignedTo && `Assigned: ${item.assignedTo}`,
     item.department,
     item.counterparty && `Counterparty: ${item.counterparty}`,
@@ -72,11 +72,9 @@ function WorkflowItem({ item }) {
             {PRIORITY_LABELS[item.priority] || item.priority}
           </span>
         )}
-        <span className="wf-item-type">{item.internalOrExternal || ''}</span>
       </div>
       <div className="wf-item-title">{title}</div>
       {meta && <div className="wf-item-meta">{meta}</div>}
-      {item.legalRequestId && <div className="wf-item-action">Legal request: {item.legalRequestId}</div>}
       {item.nextAction && <div className="wf-item-action">Next: {item.nextAction}</div>}
       <ItemBadges item={item} />
     </div>

@@ -25,9 +25,6 @@ const PAGE_MAP = {
   setting:       '/settings',
   users:           '/settings/users',
   profile:         '/profile',
-  'legal requests': '/legal-requests',
-  'legal request':  '/legal-requests',
-  legalrequests:   '/legal-requests',
   'ai audit':      '/ai/audit',
   'audit log':     '/ai/audit',
 };

@@ -11,6 +11,7 @@ const documentSchema = new mongoose.Schema({
   type: { type: String, enum: ['pdf', 'docx', 'doc', 'other'], default: 'pdf' },
   contract:     { type: mongoose.Schema.Types.ObjectId, ref: 'Contract' },
   task:         { type: mongoose.Schema.Types.ObjectId, ref: 'Task' },
+  // TODO: Remove legacy LegalRequest fields in a future database migration after data review.
   legalRequest: { type: mongoose.Schema.Types.ObjectId, ref: 'LegalRequest' },
   documentStage: {
     type: String,

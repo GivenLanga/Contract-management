@@ -1,14 +1,11 @@
 const Contract      = require('../../models/Contract');
 const Document      = require('../../models/Document');
 const Task          = require('../../models/Task');
-const LegalRequest  = require('../../models/LegalRequest');
 const {
   contractVisibilityFilter,
   documentVisibilityFilter,
-  isPrivilegedUser,
   mergeFilters,
   taskVisibilityFilter,
-  userId,
 } = require('../security/DataScope');
 
 module.exports = [
@@ -24,14 +21,6 @@ module.exports = [
       const documentScope = documentVisibilityFilter(context.user);
       const taskScope = taskVisibilityFilter(context.user);
 
-      const legalReqId = userId(context.user);
-      const legalRequestScope = isPrivilegedUser(context.user)
-        ? {}
-        : legalReqId
-          ? { $or: [{ assignedTo: legalReqId }, { submittedBy: legalReqId }] }
-          : { _id: null };
-      const legalActiveScope = mergeFilters(legalRequestScope, { status: { $nin: ['CLOSED', 'CANCELLED'] } });
-
       const [
         totalContracts,
         activeContracts,
@@ -43,8 +32,8 @@ module.exports = [
         totalTasks,
         myOpenTasks,
         overdueTasks,
-        openLegalRequests,
-        overdueLegalRequests,
+        workflowTasks,
+        finalDocuments,
       ] = await Promise.all([
         Contract.countDocuments(contractScope),
         Contract.countDocuments(mergeFilters(contractScope, { status: 'Active' })),
@@ -61,8 +50,8 @@ module.exports = [
           ? Task.countDocuments(mergeFilters(taskScope, { assignedTo: uid, status: { $nin: ['Completed', 'Cancelled'] } }))
           : Promise.resolve(null),
         Task.countDocuments(mergeFilters(taskScope, { deadline: { $lt: new Date() }, status: { $nin: ['Completed', 'Cancelled'] } })),
-        LegalRequest.countDocuments(legalActiveScope),
-        LegalRequest.countDocuments(mergeFilters(legalActiveScope, { dueDate: { $lt: new Date() } })),
+        Task.countDocuments(mergeFilters(taskScope, { sourceType: { $in: ['LEGAL_TRACKER', 'MANUAL_WORKFLOW'] }, status: { $nin: ['Completed', 'Cancelled'] } })),
+        Document.countDocuments(mergeFilters(documentScope, { documentStage: 'FINAL' })),
       ]);
 
       const statusBreakdown = {};
@@ -88,12 +77,14 @@ module.exports = [
             total: totalTasks,
             myOpen: myOpenTasks,
             overdue: overdueTasks,
+            workflow: workflowTasks,
           },
-          legalRequests: {
-            open: openLegalRequests,
-            overdue: overdueLegalRequests,
+          signingPipeline: {
+            finalDocuments,
+            pendingSignature: pendingSignatureDocs,
+            signedDocuments: signedDocs,
           },
-          message: `System overview: ${totalContracts} contracts (${activeContracts} active), ${totalDocuments} documents (${pendingSignatureDocs} pending signature, ${signedDocs} signed), ${overdueTasks} overdue task${overdueTasks !== 1 ? 's' : ''}, ${openLegalRequests} open legal request${openLegalRequests !== 1 ? 's' : ''}.`,
+          message: `System overview: ${totalContracts} contracts (${activeContracts} active), ${totalDocuments} documents (${pendingSignatureDocs} pending signature, ${signedDocs} signed), ${workflowTasks} active workflow task${workflowTasks !== 1 ? 's' : ''}, ${overdueTasks} overdue task${overdueTasks !== 1 ? 's' : ''}.`,
         },
       };
     },
@@ -120,12 +111,6 @@ module.exports = [
       const contractScope = contractVisibilityFilter(context.user);
       const documentScope = documentVisibilityFilter(context.user);
       const taskScope = taskVisibilityFilter(context.user);
-      const legalReqId = userId(context.user);
-      const legalRequestScope = isPrivilegedUser(context.user)
-        ? {}
-        : legalReqId
-          ? { $or: [{ assignedTo: legalReqId }, { submittedBy: legalReqId }] }
-          : { _id: null };
 
       const [
         activeContracts,
@@ -134,8 +119,8 @@ module.exports = [
         signedDocs,
         openTasks,
         overdueTasks,
-        openLegalRequests,
-        overdueLegalRequests,
+        workflowTasks,
+        finalDocuments,
       ] = await Promise.all([
         Contract.countDocuments(mergeFilters(contractScope, { status: 'Active' })),
         Contract.countDocuments(mergeFilters(contractScope, { status: 'Expired' })),
@@ -143,8 +128,8 @@ module.exports = [
         Document.countDocuments(mergeFilters(documentScope, { status: 'Signed' })),
         Task.countDocuments(mergeFilters(taskScope, { status: { $nin: ['Completed', 'Cancelled'] } })),
         Task.countDocuments(mergeFilters(taskScope, { deadline: { $lt: new Date() }, status: { $nin: ['Completed', 'Cancelled'] } })),
-        LegalRequest.countDocuments(mergeFilters(legalRequestScope, { status: { $nin: ['CLOSED', 'CANCELLED'] } })),
-        LegalRequest.countDocuments(mergeFilters(legalRequestScope, { dueDate: { $lt: new Date() }, status: { $nin: ['CLOSED', 'CANCELLED'] } })),
+        Task.countDocuments(mergeFilters(taskScope, { sourceType: { $in: ['LEGAL_TRACKER', 'MANUAL_WORKFLOW'] }, status: { $nin: ['Completed', 'Cancelled'] } })),
+        Document.countDocuments(mergeFilters(documentScope, { documentStage: 'FINAL' })),
       ]);
 
       const metrics = {
@@ -154,8 +139,8 @@ module.exports = [
         signedDocs,
         openTasks,
         overdueTasks,
-        openLegalRequests,
-        overdueLegalRequests,
+        workflowTasks,
+        finalDocuments,
         reportType,
         period: args.period || 'all',
       };
@@ -164,7 +149,7 @@ module.exports = [
         type: reportType === 'dashboard' ? 'dashboard_summary' : 'report_summary',
         category: reportType,
         title: reportType === 'dashboard' ? 'Dashboard Summary' : `${reportType.replace(/_/g, ' ')} Summary`,
-        summary: `Summary: ${activeContracts} active contracts, ${openLegalRequests} open legal requests, ${openTasks} open tasks, ${pendingSignatureDocs} documents awaiting signature.`,
+        summary: `Summary: ${activeContracts} active contracts, ${workflowTasks} workflow tasks, ${openTasks} open tasks, ${pendingSignatureDocs} documents awaiting signature.`,
         metrics,
         items: [],
       };

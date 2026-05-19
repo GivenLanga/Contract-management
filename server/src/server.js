@@ -16,8 +16,6 @@ const aiRoutes      = require('./routes/ai');
 const aiAuditRoutes = require('./routes/aiAudit');
 const notificationRoutes = require('./routes/notifications');
 const reportRoutes = require('./routes/reports');
-const legalRequestRoutes    = require('./routes/legalRequests');
-const signatureRequestRoutes = require('./routes/signatureRequests');
 const { getInstance: getAiRuntimeManager } = require('./ai/runtime/AiRuntimeManager');
 
 const app = express();
@@ -28,7 +26,7 @@ app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
 app.use(cors({
   origin: (origin, callback) => {
-    const allowed = process.env.FRONTEND_URL || 'http://localhost:5173';
+    const allowed = process.env.FRONTEND_URL || 'http://localhost:5174';
     if (
       !origin ||                // no Origin header (curl, server-to-server)
       origin === 'null' ||      // file:// pages in Electron production
@@ -80,8 +78,6 @@ app.use('/api/ai', aiRoutes);
 app.use('/api/ai/audit', aiAuditRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/reports', reportRoutes);
-app.use('/api/legal-requests', legalRequestRoutes);
-app.use('/api/signature-requests', signatureRequestRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -115,11 +111,5 @@ server.on('error', (err) => {
 
 // Start expiry notification cron job after server starts
 require('./services/expiryService');
-
-// Run legal-deadline monitor every 6 hours
-const { runDeadlineMonitor } = require('./services/legalDeadlineMonitorService');
-setInterval(() => {
-  runDeadlineMonitor().catch(err => console.error('[deadlineMonitor]', err));
-}, 6 * 3600 * 1000);
 
 module.exports = app;

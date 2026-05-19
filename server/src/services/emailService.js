@@ -103,7 +103,7 @@ const sendDocumentUpload = async (recipients, document, uploader) => {
 };
 
 const sendSigningRequest = async (signer, document, requestedBy, signerToken) => {
-  const appUrl = process.env.APP_URL || 'http://localhost:5173';
+  const appUrl = process.env.APP_URL || 'http://localhost:5174';
   const signingLink = signerToken
     ? `${appUrl}/sign/external/${signerToken}`
     : `${appUrl}/signing`;
@@ -125,7 +125,7 @@ const sendSigningRequest = async (signer, document, requestedBy, signerToken) =>
 };
 
 const sendSigningReminder = async (signer, document, requestedBy, signerToken) => {
-  const appUrl = process.env.APP_URL || 'http://localhost:5173';
+  const appUrl = process.env.APP_URL || 'http://localhost:5174';
   const signingLink = signerToken
     ? `${appUrl}/sign/external/${signerToken}`
     : `${appUrl}/signing`;

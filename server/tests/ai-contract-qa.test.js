@@ -529,11 +529,9 @@ test('get_expired_contracts zero-count message is accurate', async () => {
 // ── 14. Contracts by type tool structure ──────────────────────────────────
 
 test('get_contracts_by_type returns contract_summary type with contractType in metrics', async () => {
-  const originalFind   = Contract.find;
-  const originalLRFind = require('../src/models/LegalRequest').find;
+  const originalFind = Contract.find;
 
   Contract.find = () => ({ sort: () => ({ limit: () => ({ lean: () => Promise.resolve([]) }) }) });
-  require('../src/models/LegalRequest').find = () => ({ sort: () => ({ limit: () => ({ lean: () => Promise.resolve([]) }) }) });
 
   try {
     const tool = contractTools.find((t) => t.name === 'get_contracts_by_type');
@@ -543,21 +541,17 @@ test('get_contracts_by_type returns contract_summary type with contractType in m
     assert.equal(result.category, 'contracts_by_type');
   } finally {
     Contract.find = originalFind;
-    require('../src/models/LegalRequest').find = originalLRFind;
   }
 });
 
 // ── 15. Contracts by counterparty ─────────────────────────────────────────
 
 test('get_contracts_by_counterparty returns contract_summary with counterparty in metrics', async () => {
-  const originalFind   = Contract.find;
-  const LegalRequest   = require('../src/models/LegalRequest');
-  const originalLRFind = LegalRequest.find;
+  const originalFind = Contract.find;
 
   Contract.find = () => ({ sort: () => ({ limit: () => ({ lean: () => Promise.resolve([
     { _id: '1', title: 'ThaboTech Agreement', status: 'Active', parties: [{ name: 'ThaboTech', type: 'external', role: 'vendor', signingOrder: 1 }] },
   ]) }) }) });
-  LegalRequest.find = () => ({ sort: () => ({ limit: () => ({ lean: () => Promise.resolve([]) }) }) });
 
   try {
     const tool = contractTools.find((t) => t.name === 'get_contracts_by_counterparty');
@@ -568,7 +562,6 @@ test('get_contracts_by_counterparty returns contract_summary with counterparty i
     assert.ok(result.summary.toLowerCase().includes('thabotech'), `Summary should mention counterparty: "${result.summary}"`);
   } finally {
     Contract.find = originalFind;
-    LegalRequest.find = originalLRFind;
   }
 });
 

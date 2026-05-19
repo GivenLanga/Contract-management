@@ -127,6 +127,9 @@ contextBridge.exposeInMainWorld('contractiq', {
   trackerUpdateRow: async (args) => {
     return ipcRenderer.invoke('tracker:updateRow', args);
   },
+  trackerReadRow: async (args) => {
+    return ipcRenderer.invoke('tracker:readRow', args);
+  },
   trackerOpenFile: async () => {
     return ipcRenderer.invoke('tracker:openFile');
   },

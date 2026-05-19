@@ -5,10 +5,10 @@
   "type": "module",
   "main": "electron/main.js",
   "scripts": {
-    "dev": "vite",
-    "dev:web": "vite",
+    "dev": "vite --port 5174 --strictPort",
+    "dev:web": "vite --port 5174 --strictPort",
     "dev:backend": "cd server && npm run dev",
-    "dev:electron": "wait-on http://localhost:5173 http://localhost:5000/api/health && cross-env NODE_ENV=development electron electron/main.js",
+    "dev:electron": "wait-on http://localhost:5174 http://localhost:5000/api/health && cross-env NODE_ENV=development ELECTRON_DEV_URL=http://localhost:5174 electron electron/main.js",
     "dev:desktop": "concurrently -k \"npm run dev:backend\" \"npm run dev:web\" \"npm run dev:electron\"",
     "desktop": "vite build && cross-env NODE_ENV=production electron electron/main.js",
     "build": "vite build",

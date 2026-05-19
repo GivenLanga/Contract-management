@@ -4,23 +4,7 @@ const { CATEGORIES, DomainIntentClassifier } = require('./DomainIntentClassifier
 const { normalizeQuery } = require('./QueryNormalizer');
 const { clarificationRequired } = require('../results/AiResultFactory');
 
-const DEFAULT_LEGAL_REQUEST_FIELDS = [
-  'id', 'title', 'requestType', 'documentCategory', 'department', 'submittedAt',
-  'status', 'priority', 'assignedTo', 'currentHolder', 'dueDate', 'targetDate', 'nextAction',
-];
-
-const FINANCE_REQUEST_FIELDS = [
-  'title', 'description', 'requestType', 'documentCategory', 'submittedAt',
-  'dueDate', 'targetDate', 'status', 'nextAction',
-];
-
 const hasAny = (text, ...terms) => terms.some((term) => text.includes(term));
-const hasAll = (text, ...terms) => terms.every((term) => text.includes(term));
-
-const periodOrAll = (normalized) =>
-  /\b(today|this week|this month|this quarter|this year)\b/.test(normalized.text)
-    ? normalized.period
-    : 'all';
 
 const progressPeriod = (normalized) =>
   ['today', 'this_week', 'this_month', 'this_year'].includes(normalized.period)
@@ -63,9 +47,6 @@ class AppDataQueryPlanner {
     const generalOperationalPlan = this._generalOperational(normalized, classification);
     if (generalOperationalPlan) return generalOperationalPlan;
 
-    const legalRequestPlan = this._legalRequests(normalized, classification);
-    if (legalRequestPlan) return legalRequestPlan;
-
     const documentPlan = this._documents(normalized, classification);
     if (documentPlan) return documentPlan;
 
@@ -97,30 +78,66 @@ class AppDataQueryPlanner {
 
   _generalOperational(n, classification) {
     const text = n.text;
-    if (hasAny(text, 'attention today', 'needs my attention', 'need my attention', 'what should i follow up')) {
-      return plan({
-        domain: 'legal_requests',
-        intent: 'attention',
-        capabilityId: 'legal_requests.manager_attention',
-        toolName: 'get_manager_attention_summary',
-        args: {},
-        requestedFields: DEFAULT_LEGAL_REQUEST_FIELDS,
-        answerShape: 'metric_summary',
-        confidence: 0.96,
-        classification,
-        normalized: n,
-        reason: 'Matched general manager-attention operational query.',
-      });
-    }
-    if (/\bdue today\b/.test(text) && !/\btasks?\b/.test(text)) {
-      return this._simpleLegalRequestTool(n, classification, 'legal_requests.due_today', 'get_due_today', 'list', {}, ['dueDate'], 'Matched general due-today legal request query.');
-    }
-    if (/\bdue this week\b/.test(text) && !/\btasks?\b/.test(text)) {
-      return this._simpleLegalRequestTool(n, classification, 'legal_requests.due_this_week', 'get_due_this_week', 'list', {}, ['dueDate'], 'Matched general due-this-week legal request query.');
-    }
-    if (/\boverdue\b/.test(text) && !/\b(tasks?|contracts?|documents?)\b/.test(text)) {
-      return this._simpleLegalRequestTool(n, classification, 'legal_requests.overdue', 'get_overdue_requests', 'list', {}, ['dueDate'], 'Matched general overdue legal request query.');
-    }
+	    if (hasAny(text, 'attention today', 'needs my attention', 'need my attention', 'what should i follow up')) {
+	      return plan({
+	        domain: 'tasks',
+	        intent: 'list',
+	        capabilityId: 'tasks.attention_today',
+	        toolName: 'query_tasks',
+	        args: { filters: { dueRange: 'today' }, limit: 20 },
+	        requestedFields: ['title', 'status', 'priority', 'deadline', 'assignedTo', 'sourceType'],
+	        answerShape: 'cards',
+	        confidence: 0.96,
+	        classification,
+	        normalized: n,
+	        reason: 'Matched general manager-attention operational query.',
+	      });
+	    }
+	    if (/\bdue today\b/.test(text) && !/\btasks?\b/.test(text)) {
+	      return plan({
+	        domain: 'tasks',
+	        intent: 'list',
+	        capabilityId: 'tasks.due_today',
+	        toolName: 'query_tasks',
+	        args: { filters: { dueRange: 'today' }, limit: 20 },
+	        requestedFields: ['title', 'status', 'priority', 'deadline', 'assignedTo', 'sourceType'],
+	        answerShape: 'cards',
+	        confidence: 0.94,
+	        classification,
+	        normalized: n,
+	        reason: 'Matched general due-today task query.',
+	      });
+	    }
+	    if (/\bdue this week\b/.test(text) && !/\btasks?\b/.test(text)) {
+	      return plan({
+	        domain: 'tasks',
+	        intent: 'list',
+	        capabilityId: 'tasks.due_this_week',
+	        toolName: 'query_tasks',
+	        args: { filters: { dueRange: 'this_week' }, limit: 20 },
+	        requestedFields: ['title', 'status', 'priority', 'deadline', 'assignedTo', 'sourceType'],
+	        answerShape: 'cards',
+	        confidence: 0.94,
+	        classification,
+	        normalized: n,
+	        reason: 'Matched general due-this-week task query.',
+	      });
+	    }
+	    if (/\boverdue\b/.test(text) && !/\b(tasks?|contracts?|documents?)\b/.test(text)) {
+	      return plan({
+	        domain: 'tasks',
+	        intent: 'list',
+	        capabilityId: 'tasks.overdue',
+	        toolName: 'list_overdue_tasks',
+	        args: { mine_only: false, limit: 20 },
+	        requestedFields: ['title', 'status', 'priority', 'deadline', 'assignedTo', 'sourceType'],
+	        answerShape: 'cards',
+	        confidence: 0.94,
+	        classification,
+	        normalized: n,
+	        reason: 'Matched general overdue task query.',
+	      });
+	    }
     return null;
   }
 
@@ -141,9 +158,9 @@ class AppDataQueryPlanner {
     return clarificationRequired({
       title: 'Choose a System Lookup',
       summary: `I need to use a backend tool for ${domain}, but I could not select one confidently. Please ask for a count, list, status, value, due-date, signing, or progress lookup.`,
-      options: ['contracts', 'legal requests', 'tasks', 'signing', 'documents', 'reports'],
-    });
-  }
+	      options: ['contracts', 'tasks', 'signing', 'documents', 'reports'],
+	    });
+	  }
 
   _notAppData(normalized, classification, reason) {
     return {
@@ -161,171 +178,6 @@ class AppDataQueryPlanner {
       classification,
       normalizedQuery: normalized.text,
     };
-  }
-
-  _legalRequests(n, classification) {
-    const text = n.text;
-    const hasLegalRequests = n.domainHints.includes('legal_requests') || hasAny(text, 'legal requests', 'legal intake', 'to legal');
-    const isLegalTeamProgress = hasAny(text, 'legal team', 'how is legal doing', 'legal doing') && hasAny(text, 'progress', 'doing', 'performance');
-    if (!hasLegalRequests && !isLegalTeamProgress) return null;
-
-    if (hasAny(text, 'attention today', 'needs my attention', 'need my attention') || hasAll(text, 'manager', 'attention')) {
-      return plan({
-        domain: 'legal_requests',
-        intent: 'attention',
-        capabilityId: 'legal_requests.manager_attention',
-        toolName: 'get_manager_attention_summary',
-        args: {},
-        requestedFields: DEFAULT_LEGAL_REQUEST_FIELDS,
-        answerShape: 'metric_summary',
-        confidence: 0.96,
-        classification,
-        normalized: n,
-        reason: 'Matched legal request attention query.',
-      });
-    }
-
-    if (
-      hasAny(text, 'tasks in legal requests', 'tasks are in legal requests', 'task are in legal requests', 'legal request tasks') ||
-      /\btasks?\s+(?:are\s+)?in\s+(?:the\s+)?legal requests\b/.test(text)
-    ) {
-      return plan({
-        domain: 'legal_requests',
-        intent: 'list',
-        capabilityId: 'legal_requests.tasks',
-        toolName: 'get_legal_request_tasks',
-        args: { limit: 20 },
-        filters: { linkedLegalRequest: true },
-        requestedFields: ['title', 'status', 'priority', 'dueDate', 'assignedTo', 'legalRequestId', 'legalRequestTitle'],
-        answerShape: 'cards',
-        confidence: 0.95,
-        classification,
-        normalized: n,
-        reason: 'Matched tasks linked to legal requests.',
-      });
-    }
-
-    if (isLegalTeamProgress || hasAny(text, 'legal team progress', 'legal teams progress', 'how is legal doing')) {
-      return plan({
-        domain: 'reports',
-        intent: 'progress',
-        capabilityId: 'reports.legal_team_progress',
-        toolName: 'get_legal_team_progress',
-        args: { period: progressPeriod(n) },
-        filters: { period: n.period },
-        requestedFields: ['submitted', 'completed', 'overdue', 'slaCompliance'],
-        answerShape: 'metric_summary',
-        confidence: 0.94,
-        classification,
-        normalized: n,
-        reason: 'Matched legal team progress report.',
-      });
-    }
-
-    if (/\bdue today\b/.test(text)) {
-      return this._simpleLegalRequestTool(n, classification, 'legal_requests.due_today', 'get_due_today', 'list', {}, ['dueDate'], 'Matched due-today legal request query.');
-    }
-    if (/\bdue this week\b|\bdue next week\b|\bdue within\b/.test(text)) {
-      return this._simpleLegalRequestTool(n, classification, 'legal_requests.due_this_week', 'get_due_this_week', 'list', {}, ['dueDate'], 'Matched due-this-week legal request query.');
-    }
-    if (/\boverdue|past due|late\b/.test(text)) {
-      return this._simpleLegalRequestTool(n, classification, 'legal_requests.overdue', 'get_overdue_requests', 'list', {}, ['dueDate'], 'Matched overdue legal request query.');
-    }
-    if (/\bunassigned|not assigned|no owner|without owner\b/.test(text)) {
-      return this._simpleLegalRequestTool(n, classification, 'legal_requests.unassigned', 'get_unassigned_requests', 'list', {}, ['assignedTo'], 'Matched unassigned legal request query.');
-    }
-    if (n.legalRequestStatus === 'WITH_MANAGER') {
-      return this._simpleLegalRequestTool(n, classification, 'legal_requests.waiting_manager', 'get_waiting_for_manager', 'list', {}, ['currentHolder', 'status'], 'Matched manager waiting legal request query.');
-    }
-    if (n.legalRequestStatus === 'WITH_BUSINESS_DEPARTMENT') {
-      return this._simpleLegalRequestTool(n, classification, 'legal_requests.waiting_business', 'get_waiting_for_business', 'list', {}, ['currentHolder', 'status'], 'Matched business waiting legal request query.');
-    }
-    if (/\b(no update|stale|stuck|no activity|no progress|no movement)\b/.test(text)) {
-      return this._simpleLegalRequestTool(n, classification, 'legal_requests.no_update', 'get_no_update_requests', 'list', {}, ['lastStatusChangeAt'], 'Matched stale/no-update legal request query.');
-    }
-
-    const filters = {};
-    let capabilityId = 'legal_requests.list';
-    let intent = 'list';
-    let answerShape = 'cards';
-    let confidence = 0.86;
-    let requestedFields = DEFAULT_LEGAL_REQUEST_FIELDS;
-
-    if (n.priority) {
-      filters.priority = n.priority;
-      if (n.priority === 'URGENT') filters.urgentOnly = true;
-      capabilityId = 'legal_requests.urgent';
-      confidence = 0.95;
-    }
-    if (n.departments.length) {
-      filters.department = n.departments[0];
-      capabilityId = n.departments[0] === 'Finance' ? 'legal_requests.finance' : 'legal_requests.by_department';
-      confidence = Math.max(confidence, 0.94);
-    }
-    if (n.legalRequestStatus) {
-      filters.status = n.legalRequestStatus;
-      if (n.legalRequestStatus === 'CLOSED') filters.closedOnly = true;
-      capabilityId = 'legal_requests.by_status';
-      confidence = Math.max(confidence, 0.92);
-    }
-    if (hasAny(text, 'my action', 'need my action', 'assigned to me', 'for me')) {
-      filters.assignedTo = 'me';
-      capabilityId = 'legal_requests.my_action';
-      confidence = Math.max(confidence, 0.9);
-    }
-    if (hasAny(text, 'what did', 'asked for', 'want it', 'need it', 'when do they want')) {
-      capabilityId = n.departments.length
-        ? 'legal_requests.department_requested_items'
-        : 'legal_requests.field_answer';
-      intent = 'field_answer';
-      answerShape = 'table';
-      requestedFields = FINANCE_REQUEST_FIELDS;
-      confidence = Math.max(confidence, 0.95);
-    }
-    if (hasAny(text, 'submitted status', 'in submitted')) {
-      filters.status = 'SUBMITTED';
-      capabilityId = 'legal_requests.submitted';
-      confidence = Math.max(confidence, 0.93);
-    }
-
-    return plan({
-      domain: 'legal_requests',
-      intent,
-      capabilityId,
-      toolName: 'query_legal_requests',
-      args: {
-        filters,
-        requestedFields,
-        period: periodOrAll(n),
-        limit: 20,
-        sortBy: filters.priority ? 'priority' : 'updatedAt',
-        answerShape,
-      },
-      filters,
-      requestedFields,
-      answerShape,
-      confidence,
-      classification,
-      normalized: n,
-      reason: 'Matched generic legal request query with filters and requested fields.',
-    });
-  }
-
-  _simpleLegalRequestTool(n, classification, capabilityId, toolName, intent, filters, extraFields, reason) {
-    return plan({
-      domain: 'legal_requests',
-      intent,
-      capabilityId,
-      toolName,
-      args: {},
-      filters,
-      requestedFields: unique([...DEFAULT_LEGAL_REQUEST_FIELDS, ...extraFields]),
-      answerShape: 'cards',
-      confidence: 0.94,
-      classification,
-      normalized: n,
-      reason,
-    });
   }
 
   _contracts(n, classification) {
@@ -417,14 +269,14 @@ class AppDataQueryPlanner {
   _tasks(n, classification) {
     const text = n.text;
     if (!n.domainHints.includes('tasks')) return null;
-    if (/\b(workload|overloaded|most legal work|most work|capacity)\b/.test(text)) {
+    if (/\b(workload|overloaded|most work|capacity)\b/.test(text)) {
       return plan({
         domain: 'tasks',
         intent: 'summary',
         capabilityId: 'tasks.team_workload',
-        toolName: 'get_workload_by_user',
-        args: {},
-        requestedFields: ['name', 'total', 'overdue', 'awaitingSignature'],
+        toolName: 'get_task_summary',
+        args: { mine_only: false, period: progressPeriod(n) },
+        requestedFields: ['pending', 'inProgress', 'overdue', 'completed'],
         answerShape: 'metric_summary',
         confidence: 0.95,
         classification,
@@ -437,16 +289,19 @@ class AppDataQueryPlanner {
     if (/\bcompleted\b/.test(text)) filters.completedThisMonth = n.period === 'this_month';
     if (/\bdue today\b/.test(text)) filters.dueRange = 'today';
     if (/\bdue this week\b/.test(text)) filters.dueRange = 'this_week';
-    if (hasAny(text, 'legal requests', 'legal request')) filters.linkedLegalRequest = true;
+    if (/\btracker\b/.test(text)) filters.sourceType = 'LEGAL_TRACKER';
+    if (/\bmanual workflow|manual task\b/.test(text)) filters.sourceType = 'MANUAL_WORKFLOW';
+    if (/\bsignature follow[- ]?ups?\b/.test(text)) filters.sourceType = 'SIGNATURE_FOLLOW_UP';
+    if (/\bunassigned|not assigned|no owner|without owner\b/.test(text)) filters.unassignedOnly = true;
     if (/\b(my|i have|assigned to me)\b/.test(text)) filters.assignedTo = 'me';
     return plan({
       domain: 'tasks',
       intent: /\b(how many|count|number of)\b/.test(text) ? 'count' : 'list',
-      capabilityId: filters.linkedLegalRequest ? 'tasks.by_legal_request' : 'tasks.my_list',
+      capabilityId: filters.sourceType ? 'tasks.by_source' : 'tasks.my_list',
       toolName: 'query_tasks',
       args: { filters, countOnly: /\b(how many|count|number of)\b/.test(text), limit: 20 },
       filters,
-      requestedFields: ['title', 'status', 'priority', 'deadline', 'assignedTo', 'legalRequest'],
+      requestedFields: ['title', 'status', 'priority', 'deadline', 'assignedTo', 'sourceType'],
       answerShape: /\b(how many|count|number of)\b/.test(text) ? 'count' : 'cards',
       confidence: 0.88,
       classification,
@@ -505,14 +360,14 @@ class AppDataQueryPlanner {
   _reports(n, classification) {
     const text = n.text;
     if (!n.domainHints.includes('reports')) return null;
-    if (/\blegal team|legal doing|progress\b/.test(text)) {
+    if (/\bworkflow|tasks?|progress\b/.test(text)) {
       return plan({
         domain: 'reports',
         intent: 'progress',
-        capabilityId: 'reports.legal_team_progress',
-        toolName: 'get_legal_team_progress',
-        args: { period: progressPeriod(n) },
-        requestedFields: ['submitted', 'completed', 'overdue', 'slaCompliance'],
+        capabilityId: 'reports.workflow_progress',
+        toolName: 'query_reports_summary',
+        args: { reportType: 'tasks', period: progressPeriod(n) },
+        requestedFields: ['openTasks', 'overdueTasks', 'workflowTasks'],
         answerShape: 'metric_summary',
         confidence: 0.92,
         classification,
@@ -562,7 +417,5 @@ class AppDataQueryPlanner {
     return 'dashboard';
   }
 }
-
-const unique = (values) => Array.from(new Set(values.filter(Boolean)));
 
 module.exports = { AppDataQueryPlanner };

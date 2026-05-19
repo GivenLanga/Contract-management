@@ -348,16 +348,17 @@ router.get('/health', async (req, res) => {
 // GET /api/ai/suggestions — quick suggestion chips
 router.get('/suggestions', (req, res) => {
   res.json({
-    suggestions: [
-      'What needs my attention today?',
-      'What is overdue?',
-      'Show internal SLA compliance',
-      'What is due this week?',
-      'Who is overloaded on the team?',
-      'List my tasks',
-      'Show documents pending signature',
-    ],
-  });
+	    suggestions: [
+	      'What tracker tasks are overdue?',
+	      'Show unassigned workflow tasks',
+	      'What needs my attention today?',
+	      'Show final documents ready for signing',
+	      'Show signed contracts expiring soon',
+	      'Show tracker warnings',
+	      'Show documents pending signature',
+	      'List my tasks',
+	    ],
+	  });
 });
 
 // Legacy /query endpoint kept for backwards compatibility

@@ -97,8 +97,8 @@ class CapabilityMatcher {
       counterparty,
       hasContracts: hasAny(text, 'contract', 'contracts', 'agreement', 'agreements'),
       hasDocuments: hasAny(text, 'document', 'documents', 'file', 'files'),
-      hasLegalRequests: hasAny(text, 'legal request', 'legal requests', 'legal intake', 'intake'),
-      hasTasks: hasAny(text, 'task', 'tasks', 'workload', 'overloaded'),
+      hasWorkflows: hasAny(text, 'workflow', 'workflows', 'tracker', 'legal tracker', 'manual workflow'),
+      hasTasks: hasAny(text, 'task', 'tasks', 'workload', 'overloaded', 'workflow task', 'tracker task'),
       hasSigning: hasAny(text, 'sign', 'signed', 'signing', 'signature', 'signatures', 'signatory', 'signatories'),
       wantsValue: /\b(total value|value of|worth|how much|amount)\b/.test(text),
       wantsProgress: /\b(progress|performance|how is legal doing|how is the legal team doing|legal team)\b/.test(text),
@@ -108,7 +108,8 @@ class CapabilityMatcher {
       wantsSigned: /\b(signed|fully signed|executed|been signed|have been signed)\b/.test(text),
       wantsAwaitingSignature: /\b(awaiting signature|pending signature|still needs to sign|still need to sign|needs to sign|need to sign|who still needs to sign)\b/.test(text),
       wantsSentForSignature: /\b(sent for signature|sent to sign|signature email|signature emails|signing email)\b/.test(text),
-      wantsRequested: /\b(requested|what was requested|legal intake|came in|recent|new legal request|submitted)\b/.test(text),
+      wantsTracker: /\b(legal tracker|tracker task|tracker tasks|tracker row|tracker rows)\b/.test(text),
+      wantsManualWorkflow: /\b(manual workflow|manual task|manual tasks)\b/.test(text),
       wantsDueToday: /\bdue today\b/.test(text),
       wantsDueWeek: /\bdue this week|due next week|due within|due in\b/.test(text),
       wantsOverdue: /\boverdue|past due|late\b/.test(text),
@@ -118,7 +119,7 @@ class CapabilityMatcher {
       wantsUnassigned: /\b(unassigned|not assigned|no owner|without owner)\b/.test(text),
       wantsRenewal: /\b(renew|renewal|need renewal|needs renewal)\b/.test(text),
       wantsMissingSignedCopy: /\b(missing signed|no signed copy|without signed copy|missing final|missing signed copy)\b/.test(text),
-      wantsWorkload: /\b(workload|overloaded|most legal work|most legal requests|most work|capacity)\b/.test(text),
+      wantsWorkload: /\b(workload|overloaded|most legal work|most work|capacity)\b/.test(text),
       wantsRecentUploads: /\b(recent uploaded|recent uploads|recent documents|uploaded documents|recently uploaded)\b/.test(text),
       wantsNotifications: /\b(notification|notifications|alert|alerts|inbox)\b/.test(text),
     };
@@ -150,24 +151,17 @@ class CapabilityMatcher {
       if (f.count) return this._cap('contracts.count.all', {}, 0.86);
     }
 
-    if (f.hasLegalRequests || /\blegal team\b/.test(f.text)) {
-      if (f.hasTasks) return this._cap('legal_requests.tasks', {}, 0.95);
-      if (f.wantsProgress) return this._cap('legal_requests.progress_this_month', { period: this._progressPeriod(f) }, 0.94);
-      if (f.wantsDueToday) return this._cap('legal_requests.due_today', {}, 0.95);
-      if (f.wantsDueWeek) return this._cap('legal_requests.due_this_week', {}, 0.92);
-      if (f.wantsOverdue) return this._cap('legal_requests.overdue', {}, 0.95);
-      if (f.wantsUnassigned) return this._cap('legal_requests.unassigned', {}, 0.93);
-      if (f.wantsWaitingManager) return this._cap('legal_requests.waiting_manager', {}, 0.93);
-      if (f.wantsWaitingBusiness) return this._cap('legal_requests.waiting_business', {}, 0.93);
-      if (f.wantsNoUpdate) return this._cap('legal_requests.no_update', {}, 0.92);
+    if (f.hasWorkflows || /\blegal team\b/.test(f.text)) {
+      if (f.wantsTracker) return this._cap('workflows.tracker_tasks', {}, 0.95);
+      if (f.wantsManualWorkflow) return this._cap('workflows.manual_tasks', {}, 0.94);
+      if (f.wantsProgress) return this._cap('reports.workflow_progress', { period: this._progressPeriod(f) }, 0.94);
+      if (f.wantsDueToday) return this._cap('workflows.due_today', {}, 0.95);
+      if (f.wantsDueWeek) return this._cap('tasks.due_this_week', {}, 0.9);
+      if (f.wantsOverdue) return this._cap('workflows.overdue_tasks', {}, 0.95);
+      if (f.wantsUnassigned) return this._cap('workflows.unassigned_tasks', {}, 0.93);
+      if (f.wantsWaitingManager || f.wantsWaitingBusiness || f.wantsNoUpdate) return this._cap('workflows.summary', { period: this._progressPeriod(f) }, 0.88);
       if (f.wantsWorkload) return this._cap('tasks.team_workload', {}, 0.94);
-      if (f.wantsRequested || f.hasLegalRequests) {
-        const status = /\bsubmitted status|in submitted\b/.test(f.text) ? 'SUBMITTED' : 'ALL';
-        return this._cap(status === 'SUBMITTED' ? 'legal_requests.submitted' : 'legal_requests.requested', {
-          period: status === 'SUBMITTED' ? 'all' : this._legalRequestPeriod(f),
-          status,
-        }, 0.9);
-      }
+      if (f.hasTasks || f.list) return this._cap('tasks.by_source', { filters: {}, limit: 20 }, 0.86);
     }
 
     if (f.hasTasks) {
@@ -196,7 +190,7 @@ class CapabilityMatcher {
     }
 
     if (f.hasSigning || f.wantsAwaitingSignature) {
-      if (f.wantsSentForSignature) return this._cap('legal_requests.signature_email_sent', {}, 0.88);
+      if (f.wantsSentForSignature) return this._cap('signing.sent_for_signature', {}, 0.88);
       if (f.wantsDashboard) return this._cap('dashboard.overview', {}, 0.82);
       if (f.wantsSigned) return this._cap('signing.fully_signed_documents', {}, 0.9);
       if (f.count) return this._cap('signing.count_awaiting_signature', {}, 0.9);
@@ -210,14 +204,13 @@ class CapabilityMatcher {
     }
 
     if (f.wantsProgress && /\blegal\b/.test(f.text)) {
-      return this._cap('legal_requests.progress_this_month', { period: this._progressPeriod(f) }, 0.9);
+      return this._cap('reports.workflow_progress', { period: this._progressPeriod(f) }, 0.9);
     }
 
     if (f.wantsDashboard) {
       if (/\bcontract health|contract management|contract summary\b/.test(f.text)) {
         return this._cap('dashboard.contract_health', {}, 0.9);
       }
-      if (/\bsla\b/.test(f.text)) return this._cap('dashboard.sla_summary', {}, 0.88);
       return this._cap('dashboard.overview', {}, 0.82);
     }
 
@@ -226,13 +219,6 @@ class CapabilityMatcher {
 
   _cap(id, args, confidence) {
     return { id, args, confidence };
-  }
-
-  _legalRequestPeriod(f) {
-    if (f.period === 'all') return 'all';
-    if (f.period === 'this_month') return 'this_month';
-    if (f.period === 'today') return 'today';
-    return 'this_week';
   }
 
   _progressPeriod(f) {

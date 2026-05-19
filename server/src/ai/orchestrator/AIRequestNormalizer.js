@@ -3,7 +3,6 @@
 const TYPO_REPLACEMENTS = [
   [/\bwhats\b/g, 'what is'],
   [/\bwhat\s+task\s+are\b/g, 'what tasks are'],
-  [/\blegal requests\b/g, 'legal requests'],
   [/\bagreements\b/g, 'contracts'],
   [/\bagreement\b/g, 'contract'],
   [/\bsignign\b/g, 'signing'],

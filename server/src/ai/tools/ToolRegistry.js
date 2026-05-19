@@ -5,7 +5,6 @@ const documentTools      = require('./documents.tools');
 const navTools           = require('./navigation.tools');
 const overviewTools      = require('./overview.tools');
 const notificationTools  = require('./notifications.tools');
-const workflowTools      = require('./workflow.tools');
 
 class ToolRegistry {
   constructor() {
@@ -15,11 +14,10 @@ class ToolRegistry {
       ...signingTools,
       ...taskTools,
       ...documentTools,
-      ...navTools,
-      ...overviewTools,
-      ...notificationTools,
-      ...workflowTools,
-    ]) {
+	      ...navTools,
+	      ...overviewTools,
+	      ...notificationTools,
+	    ]) {
       this._tools.set(tool.name, tool);
     }
   }

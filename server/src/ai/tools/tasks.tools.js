@@ -1,10 +1,8 @@
 const Task     = require('../../models/Task');
 const Contract = require('../../models/Contract');
-const LegalRequest = require('../../models/LegalRequest');
 const {
   contractVisibilityFilter,
   isObjectIdLike,
-  legalRequestVisibilityFilter,
   mergeFilters,
   taskVisibilityFilter,
 } = require('../security/DataScope');
@@ -255,68 +253,8 @@ module.exports = [
   },
 
   {
-    name: 'get_legal_request_tasks',
-    description: 'List tasks linked to legal requests, using the current user’s task and legal-request visibility.',
-    riskLevel: 'low',
-    requiredPermissions: ['task:read'],
-    schema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        status: { type: 'string', enum: ['Pending', 'In Progress', 'Blocked', 'Completed', 'Overdue', 'Cancelled'] },
-        limit:  { type: 'number', minimum: 1, maximum: 50 },
-      },
-    },
-    async execute(args, context) {
-      const { status, limit = 20 } = args;
-      const taskFilter = mergeFilters(
-        taskVisibilityFilter(context.user),
-        { legalRequest: { $ne: null } },
-        status ? { status } : {},
-      );
-
-      const tasks = await Task.find(taskFilter)
-        .populate('assignedTo', 'name')
-        .populate('legalRequest', 'requestId title status dueDate targetDate department currentHolder')
-        .sort({ deadline: 1, updatedAt: -1 })
-        .limit(limit)
-        .lean();
-
-      const legalScope = legalRequestVisibilityFilter(context.user);
-      const visibleRequestIds = await LegalRequest.find(legalScope).select('_id').lean();
-      const visibleSet = new Set(visibleRequestIds.map((lr) => String(lr._id)));
-      const visibleTasks = tasks.filter((task) => visibleSet.has(String(task.legalRequest?._id || task.legalRequest)));
-
-      return {
-        type: 'task_summary',
-        category: 'legal_request_tasks',
-        title: 'Legal Request Tasks',
-        summary: visibleTasks.length
-          ? `${visibleTasks.length} task${visibleTasks.length !== 1 ? 's are' : ' is'} linked to legal requests.`
-          : 'No accessible tasks linked to legal requests were found.',
-        metrics: { count: visibleTasks.length, status: status || 'ALL' },
-        items: visibleTasks.map((task) => {
-          const safe = safeTaskFields(task, context.user);
-          return {
-            id: safe._id,
-            title: safe.title,
-            status: safe.status,
-            priority: safe.priority,
-            dueDate: safe.deadline,
-            type: safe.type,
-            assignedTo: safe.assignedTo?.name || null,
-            legalRequestId: task.legalRequest?.requestId || null,
-            legalRequestTitle: task.legalRequest?.title || null,
-            currentHolder: task.legalRequest?.currentHolder || null,
-          };
-        }),
-      };
-    },
-  },
-
-  {
     name: 'query_tasks',
-    description: 'Query visible tasks with structured filters for assignee, legal-request linkage, due dates, overdue state, completion period, and counts.',
+    description: 'Query visible tasks with structured filters for assignee, source type, due dates, overdue state, completion period, and counts.',
     riskLevel: 'low',
     requiredPermissions: ['task:read'],
     schema: {
@@ -329,7 +267,8 @@ module.exports = [
           properties: {
             status: { type: 'string', enum: ['Pending', 'In Progress', 'Blocked', 'Completed', 'Overdue', 'Cancelled'] },
             assignedTo: { type: 'string', maxLength: 80 },
-            linkedLegalRequest: { type: 'boolean' },
+            sourceType: { type: 'string', enum: ['LEGAL_TRACKER', 'MANUAL_WORKFLOW', 'SIGNATURE_FOLLOW_UP', 'DOCUMENT_REVIEW', 'GENERAL'] },
+            unassignedOnly: { type: 'boolean' },
             dueRange: { type: 'string', enum: ['today', 'this_week'] },
             overdueOnly: { type: 'boolean' },
             completedThisMonth: { type: 'boolean' },
@@ -344,7 +283,8 @@ module.exports = [
       const extra = {};
       if (filters.status) extra.status = filters.status;
       if (filters.assignedTo === 'me') extra.assignedTo = context.userId;
-      if (filters.linkedLegalRequest) extra.legalRequest = { $ne: null };
+      if (filters.sourceType) extra.sourceType = filters.sourceType;
+      if (filters.unassignedOnly) extra.$or = [{ assignedTo: null }, { assignedTo: { $exists: false } }];
       if (filters.overdueOnly) {
         extra.deadline = { $lt: new Date() };
         extra.status = { $nin: ['Completed', 'Cancelled'] };
@@ -375,31 +315,20 @@ module.exports = [
 
       const tasks = await Task.find(filter)
         .populate('assignedTo', 'name')
-        .populate('legalRequest', 'requestId title status dueDate targetDate department currentHolder')
         .populate('contract', 'title contractId')
         .sort({ deadline: 1, updatedAt: -1 })
         .limit(limit)
         .lean();
 
-      const visibleRequestIds = filters.linkedLegalRequest
-        ? await LegalRequest.find(legalRequestVisibilityFilter(context.user)).select('_id').lean()
-        : null;
-      const visibleSet = visibleRequestIds
-        ? new Set(visibleRequestIds.map((lr) => String(lr._id)))
-        : null;
-      const visibleTasks = visibleSet
-        ? tasks.filter((task) => visibleSet.has(String(task.legalRequest?._id || task.legalRequest)))
-        : tasks;
-
       return {
         type: 'task_summary',
-        category: filters.linkedLegalRequest ? 'legal_request_tasks' : 'tasks',
-        title: filters.linkedLegalRequest ? 'Legal Request Tasks' : 'Tasks',
-        summary: visibleTasks.length
-          ? `${visibleTasks.length} visible task${visibleTasks.length !== 1 ? 's' : ''} found.`
+        category: filters.sourceType ? 'workflow_tasks' : 'tasks',
+        title: filters.sourceType ? 'Workflow Tasks' : 'Tasks',
+        summary: tasks.length
+          ? `${tasks.length} visible task${tasks.length !== 1 ? 's' : ''} found.`
           : 'No visible tasks were found.',
-        metrics: { count, returned: visibleTasks.length, filters },
-        items: visibleTasks.map((task) => {
+        metrics: { count, returned: tasks.length, filters },
+        items: tasks.map((task) => {
           const safe = safeTaskFields(task, context.user);
           return {
             id: safe._id,
@@ -411,9 +340,7 @@ module.exports = [
             type: safe.type,
             assignedTo: safe.assignedTo?.name || null,
             contract: safe.contract?.title || null,
-            legalRequestId: task.legalRequest?.requestId || null,
-            legalRequestTitle: task.legalRequest?.title || null,
-            currentHolder: task.legalRequest?.currentHolder || null,
+            sourceType: safe.sourceType || null,
           };
         }),
       };

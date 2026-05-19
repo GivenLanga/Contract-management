@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { tasks as tasksApi, legalRequests as lrApi } from '../../services/api';
+import { tasks as tasksApi } from '../../services/api';
 import { TASK_TYPES } from './taskConstants';
 import './TaskForm.css';
 
@@ -11,10 +11,8 @@ export default function TaskForm({ task, users, onClose, onSaved }) {
     deadline: '',
     priority: 'Medium',
     type: 'Other',
-    legalRequest: '',
     progressNote: '',
   });
-  const [legalRequests, setLegalRequests] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -27,17 +25,10 @@ export default function TaskForm({ task, users, onClose, onSaved }) {
         deadline:     task.deadline ? new Date(task.deadline).toISOString().slice(0, 16) : '',
         priority:     task.priority || 'Medium',
         type:         task.type || 'Other',
-        legalRequest: task.legalRequest?._id || task.legalRequest || '',
         progressNote: task.progressNote || '',
       });
     }
   }, [task]);
-
-  useEffect(() => {
-    lrApi.list({ limit: 100 })
-      .then(d => setLegalRequests(d.requests || []))
-      .catch(() => {});
-  }, []);
 
   const handleChange = (e) => setForm((f) => ({ ...f, [e.target.name]: e.target.value }));
 
@@ -47,7 +38,6 @@ export default function TaskForm({ task, users, onClose, onSaved }) {
     setLoading(true);
     try {
       const payload = { ...form };
-      if (!payload.legalRequest) delete payload.legalRequest;
       if (task) {
         await tasksApi.update(task._id, payload);
       } else {
@@ -80,16 +70,6 @@ export default function TaskForm({ task, users, onClose, onSaved }) {
           <div className="form-field">
             <label>Description</label>
             <textarea name="description" value={form.description} onChange={handleChange} rows={3} placeholder="Task details and instructions..." />
-          </div>
-
-          <div className="form-field">
-            <label>Linked Legal Request</label>
-            <select name="legalRequest" value={form.legalRequest} onChange={handleChange}>
-              <option value="">None</option>
-              {legalRequests.map((lr) => (
-                <option key={lr._id} value={lr._id}>{lr.requestId} — {lr.title}</option>
-              ))}
-            </select>
           </div>
 
           <div className="form-row">

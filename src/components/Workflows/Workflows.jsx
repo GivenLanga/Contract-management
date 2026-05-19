@@ -1,17 +1,16 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { legalRequests as lrApi, tasks as tasksApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import Header from '../Layout/Header';
-import {
-  STATUS_LABELS, STATUS_COLORS, HOLDER_LABELS, HOLDER_COLORS,
-  PRIORITY_COLORS, REQUEST_TYPE_LABELS, getDaysLabel,
-} from '../LegalRequests/lrHelpers';
+import { getDaysLabel } from '../../services/dateDisplay';
 import { trackerConfig, trackerTasks as trackerTasksStore, manualTasks as manualTasksStore, workflowTemplates } from '../../services/legalTrackerStore';
-import LegalTrackerCard from './LegalTrackerCard';
-import AssignModal      from './AssignModal';
-import ManualTaskModal  from './ManualTaskModal';
-import TemplateModal    from './TemplateModal';
+import { completeManualTask } from '../../services/trackerTaskBridge';
+import LegalTrackerCard   from './LegalTrackerCard';
+import AssignModal        from './AssignModal';
+import ManualTaskModal    from './ManualTaskModal';
+import TemplateModal      from './TemplateModal';
+import TrackerRowDrawer   from './TrackerRowDrawer';
+import DoneConfirmModal   from './DoneConfirmModal';
 import './Workflows.css';
 
 // ── Pipeline column definitions ────────────────────────────────────────────────
@@ -26,36 +25,120 @@ const PIPELINE_COLS = [
   { key: 'complete',   label: 'Done',                statuses: ['FULLY_SIGNED', 'STORED', 'FINALIZED', 'CLOSED'],     color: '#94a3b8' },
 ];
 
-// ── Filter tabs ────────────────────────────────────────────────────────────────
-function itemDueDate(item)       { return item.dueDate || item.deadline || null; }
-function itemAssignee(item)      { return item.assignedTo || (item.assignee ? { name: item.assignee } : null); }
-function itemLastUpdate(item)    { return item.lastStatusChangeAt || item.lastSyncedAt || item.updatedAt || null; }
-function itemPipelineStage(item) {
-  if (item._type === 'LR') return null; // LR uses status-based pipeline mapping
-  return item.pipelineStage || 'intake';
+// ── Item normalizers ───────────────────────────────────────────────────────────
+function itemDueDate(item)    { return item.dueDate || item.deadline || null; }
+function itemAssignee(item)   { return item.assignedTo || (item.assignee ? { name: item.assignee } : null); }
+function itemLastUpdate(item) { return item.lastStatusChangeAt || item.lastSyncedAt || item.updatedAt || null; }
+
+// ── Primary tabs ───────────────────────────────────────────────────────────────
+const PRIMARY_TABS = [
+  { key: 'all',       label: 'All' },
+  { key: 'tracker',   label: 'Tracker' },
+  { key: 'manual',    label: 'Manual' },
+  { key: 'completed', label: 'Completed' },
+  { key: 'warnings',  label: 'Warnings' },
+];
+
+// ── Secondary filters per primary tab ─────────────────────────────────────────
+const SECONDARY_FILTERS = {
+  all: [
+    { key: 'all',          label: 'All Active' },
+    { key: 'overdue',      label: 'Overdue' },
+    { key: 'dueToday',     label: 'Due Today' },
+    { key: 'dueThisWeek',  label: 'Due This Week' },
+    { key: 'unassigned',   label: 'Unassigned' },
+    { key: 'withManager',  label: 'With Manager' },
+    { key: 'withBusiness', label: 'With Business' },
+    { key: 'signature',    label: 'Signature Track' },
+    { key: 'noUpdate',     label: 'No Update 3d' },
+  ],
+  tracker: [
+    { key: 'all',          label: 'All Active' },
+    { key: 'overdue',      label: 'Overdue' },
+    { key: 'dueToday',     label: 'Due Today' },
+    { key: 'dueThisWeek',  label: 'Due This Week' },
+    { key: 'unassigned',   label: 'Unassigned' },
+    { key: 'withManager',  label: 'With Manager' },
+    { key: 'withBusiness', label: 'With Business' },
+    { key: 'signature',    label: 'Signature Track' },
+    { key: 'noUpdate',     label: 'No Update 3d' },
+  ],
+  manual: [
+    { key: 'all',          label: 'All Active' },
+    { key: 'overdue',      label: 'Overdue' },
+    { key: 'dueToday',     label: 'Due Today' },
+    { key: 'dueThisWeek',  label: 'Due This Week' },
+    { key: 'unassigned',   label: 'Unassigned' },
+    { key: 'assigned',     label: 'Assigned' },
+  ],
+  completed: [
+    { key: 'all',               label: 'All Completed' },
+    { key: 'trackerCompleted',  label: 'Tracker Completed' },
+    { key: 'manualCompleted',   label: 'Manual Completed' },
+    { key: 'completedThisWeek', label: 'Completed This Week' },
+  ],
+  warnings: [
+    { key: 'all',             label: 'All Warnings' },
+    { key: 'dateParsing',     label: 'Date Parsing' },
+    { key: 'missingAssignee', label: 'Missing Assignee' },
+    { key: 'missingDeadline', label: 'Missing Deadline' },
+    { key: 'spreadsheetSync', label: 'Spreadsheet Sync' },
+    { key: 'mappingIssues',   label: 'Mapping Issues' },
+  ],
+};
+
+// ── Warning builder ────────────────────────────────────────────────────────────
+function buildWarnings(cfg, secondaryFilter, searchTerm) {
+  const raw = cfg?.warnings || [];
+  let warnings = raw.map((w, i) => {
+    const msg = typeof w === 'string' ? w : (w?.message || String(w));
+    const lower = msg.toLowerCase();
+    const rowMatch = msg.match(/row\s+(\d+)/i);
+    const rowNumber = rowMatch ? parseInt(rowMatch[1], 10) : null;
+
+    let type = 'general';
+    let severity = 'Warning';
+    let suggestedFix = '';
+
+    if ((lower.includes('parse') || lower.includes('date')) && lower.includes('deadline')) {
+      type = 'dateParsing'; suggestedFix = 'Update the deadline cell to a valid date format (DD/MM/YYYY).';
+    } else if (lower.includes('missing') && lower.includes('deadline')) {
+      type = 'missingDeadline'; suggestedFix = 'Add a deadline date to the Deadline column.';
+    } else if (lower.includes('missing') && (lower.includes('assignee') || lower.includes('assigned'))) {
+      type = 'missingAssignee'; suggestedFix = 'Add an assignee name to the Assignee column.';
+    } else if (lower.includes('column') || lower.includes('mapping') || lower.includes('header')) {
+      type = 'mappingIssues'; severity = 'Error'; suggestedFix = 'Check that your spreadsheet has the expected header row.';
+    } else if (lower.includes('lock') || lower.includes('sync') || lower.includes('write') || lower.includes('pending')) {
+      type = 'spreadsheetSync'; suggestedFix = 'Close the spreadsheet in Excel and retry sync.';
+    }
+
+    return { id: i, type, severity, message: msg, rowNumber, suggestedFix };
+  });
+
+  if (secondaryFilter && secondaryFilter !== 'all') {
+    warnings = warnings.filter(w => w.type === secondaryFilter);
+  }
+  if (searchTerm) {
+    const q = searchTerm.toLowerCase();
+    warnings = warnings.filter(w => w.message.toLowerCase().includes(q) || (w.suggestedFix || '').toLowerCase().includes(q));
+  }
+  return warnings;
 }
 
-const FILTER_TABS = [
-  { key: 'all',          label: 'All Active',      filter: () => true },
-  { key: 'overdue',      label: 'Overdue',         filter: (r) => { const d = itemDueDate(r); return d && new Date(d) < new Date(); }},
-  { key: 'dueToday',     label: 'Due Today',       filter: (r) => {
-    const d = itemDueDate(r); if (!d) return false;
-    const dd = new Date(d); const n = new Date();
-    return dd >= n && dd <= new Date(n.getFullYear(), n.getMonth(), n.getDate(), 23, 59, 59);
-  }},
-  { key: 'dueThisWeek',  label: 'Due This Week',   filter: (r) => {
-    const d = itemDueDate(r); if (!d) return false;
-    const now = new Date(); const end = new Date(now); end.setDate(end.getDate() + 7);
-    const dd = new Date(d); return dd >= now && dd <= end;
-  }},
-  { key: 'unassigned',   label: 'Unassigned',      filter: (r) => !itemAssignee(r) },
-  { key: 'withManager',  label: 'With Manager',    filter: (r) => r.status === 'WITH_MANAGER' || r.pipelineStage === 'manager' },
-  { key: 'withBusiness', label: 'With Business',   filter: (r) => r.status === 'WITH_BUSINESS_DEPARTMENT' || r.pipelineStage === 'business' },
-  { key: 'signature',    label: 'Signature Track', filter: (r) => ['READY_FOR_SIGNATURE','SENT_FOR_SIGNATURE','PARTIALLY_SIGNED'].includes(r.status) || r.pipelineStage === 'signature' },
-  { key: 'noUpdate',     label: 'No Update 3d',    filter: (r) => { const u = itemLastUpdate(r); return u && new Date(u) < new Date(Date.now() - 3 * 86400000); }},
-  { key: 'tracker',      label: 'Tracker',         filter: (r) => r._type === 'TRACKER' },
-  { key: 'manual',       label: 'Manual',          filter: (r) => r._type === 'MANUAL' },
-];
+// ── Search matcher ─────────────────────────────────────────────────────────────
+function matchesSearch(item, q) {
+  const assignee = itemAssignee(item);
+  return (
+    (item.title || item.description || '').toLowerCase().includes(q) ||
+    (item.legalTrackerId || item.workflowTaskId || '').toLowerCase().includes(q) ||
+    (item.counterpartyName || item.parties || '').toLowerCase().includes(q) ||
+    (item.department || '').toLowerCase().includes(q) ||
+    (item.taskType || '').toLowerCase().includes(q) ||
+    (item.status || item.progress || '').toLowerCase().includes(q) ||
+    (assignee?.name || item.assignee || '').toLowerCase().includes(q) ||
+    (item.rowNumber != null ? String(item.rowNumber) : '').includes(q)
+  );
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function calcDueState(dateVal) {
@@ -73,17 +156,54 @@ function normalizeItem(raw, type) {
   return { ...raw, _type: type };
 }
 
+function isCompletedWorkflowTask(task) {
+  return task.appStatus === 'completed' || task.status === 'Completed';
+}
+
+// Returns a structured completion outcome for tasks that are done.
+// Never returns "Overdue" — uses a separate tone system: success / warning / muted.
+function getCompletionOutcome(task) {
+  const deadline    = itemDueDate(task);
+  const completedAt = task.completedAt || null;
+
+  if (!deadline) {
+    return { label: 'Completed — no deadline', tone: 'muted', detail: null, outcome: 'COMPLETED_NO_DEADLINE' };
+  }
+
+  const deadlineDate = new Date(deadline);
+  if (isNaN(deadlineDate.getTime())) {
+    return { label: 'Completed', tone: 'success', detail: null, outcome: 'COMPLETED_DATE_UNKNOWN' };
+  }
+
+  const deadlineStr = deadlineDate.toLocaleDateString('en-ZA');
+
+  if (completedAt) {
+    const completedDate = new Date(completedAt);
+    if (!isNaN(completedDate.getTime())) {
+      if (completedDate > deadlineDate) {
+        const daysLate = Math.ceil((completedDate.getTime() - deadlineDate.getTime()) / 86400000);
+        return { label: `Completed ${daysLate}d late`, tone: 'warning', detail: `due ${deadlineStr}`, outcome: 'COMPLETED_LATE' };
+      }
+      return { label: 'Completed on time', tone: 'success', detail: `due ${deadlineStr}`, outcome: 'COMPLETED_ON_TIME' };
+    }
+  }
+
+  // Deadline known, but no completedAt — cannot determine lateness
+  return { label: 'Completed', tone: 'success', detail: `deadline: ${deadlineStr}`, outcome: 'COMPLETED_DATE_UNKNOWN' };
+}
+
 // ── Default export ─────────────────────────────────────────────────────────────
 export default function Workflows() {
   const navigate   = useNavigate();
   const { user, isManager } = useAuth();
 
   // ── Server data ──────────────────────────────────────────────────────────────
-  const [data, setData]       = useState(null);
+  const [data, setData]       = useState({ cards: {} });
   const [loading, setLoading] = useState(true);
 
   // ── UI state ─────────────────────────────────────────────────────────────────
-  const [activeTab, setActiveTab]           = useState('all');
+  const [primaryTab, setPrimaryTab]         = useState('all');
+  const [secondaryFilter, setSecondaryFilter] = useState('all');
   const [search, setSearch]                 = useState('');
   const [activeCardFilter, setActiveCardFilter] = useState(null);
   const [rulesOpen, setRulesOpen]           = useState(false);
@@ -102,13 +222,17 @@ export default function Workflows() {
   const [showManual, setShowManual]         = useState(false);
   const [showTemplates, setShowTemplates]   = useState(false);
 
-  // ── Load server data ──────────────────────────────────────────────────────────
+  // ── Row details drawer ────────────────────────────────────────────────────────
+  const [drawerTask, setDrawerTask]         = useState(null);
+
+  // ── Done confirmation modal ───────────────────────────────────────────────────
+  const [doneTarget, setDoneTarget]         = useState(null);
+
+  // ── Refresh view state ────────────────────────────────────────────────────────
   const load = useCallback(() => {
     setLoading(true);
-    lrApi.workflowDashboard()
-      .then(setData)
-      .catch(() => {})
-      .finally(() => setLoading(false));
+    setData({ cards: {} });
+    setLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
@@ -206,17 +330,18 @@ export default function Workflows() {
   }
 
   // ── Tracker row completion ────────────────────────────────────────────────────
-  async function handleCompleteTrackerTask(task) {
-    const fieldUpdates = { progress: 'Completed' };
-    if (window.contractiq?.trackerUpdateRow) {
-      const res = await window.contractiq.trackerUpdateRow({ rowNumber: task.rowNumber, fieldUpdates });
-      if (!res?.ok) showToastMsg('Spreadsheet sync pending — could not write Progress column.');
-    }
+  function handleOpenDoneConfirm(task) {
+    setDrawerTask(null); // close drawer if open
+    setDoneTarget(task);
+  }
+
+  function handleDoneConfirmed(task) {
     const updated = trackerItems.map(t =>
       t.id === task.id ? { ...t, appStatus: 'completed', progress: 'Completed', pipelineStage: 'complete' } : t
     );
     setTrackerItems(updated);
     trackerTasksStore.set(updated);
+    setDoneTarget(null);
     showToastMsg('Task marked as completed.');
   }
 
@@ -244,6 +369,21 @@ export default function Workflows() {
       : `Assigned to ${assignedUser.name}.`);
   }
 
+  // ── Drawer row saved ─────────────────────────────────────────────────────────
+  function handleDrawerRowSaved(updatedTask) {
+    if (updatedTask._type === 'TRACKER' || updatedTask.sourceType === 'LEGAL_TRACKER') {
+      const updated = trackerItems.map(t => t.id === updatedTask.id ? { ...t, ...updatedTask } : t);
+      setTrackerItems(updated);
+      trackerTasksStore.set(updated);
+      // Keep drawer open with updated task
+      setDrawerTask(prev => prev?.id === updatedTask.id ? { ...prev, ...updatedTask } : prev);
+    } else {
+      manualTasksStore.update(updatedTask.id, updatedTask);
+      setManualItems(manualTasksStore.get());
+    }
+    showToastMsg('Row updated in spreadsheet.');
+  }
+
   // ── Manual tasks ──────────────────────────────────────────────────────────────
   function handleManualTaskSaved(task) {
     setShowManual(false);
@@ -253,8 +393,12 @@ export default function Workflows() {
   }
 
   function handleCompleteManualTask(task) {
-    manualTasksStore.update(task.id, { status: 'Completed', pipelineStage: 'complete' });
+    manualTasksStore.update(task.id, { status: 'Completed', pipelineStage: 'complete', completedAt: new Date().toISOString() });
     setManualItems(manualTasksStore.get());
+    setDoneTarget(null);
+    setDrawerTask(null);
+    // Fire-and-forget: update the linked backend task so Tasks page reflects completion
+    completeManualTask(task).catch(() => {});
     showToastMsg('Task completed.');
   }
 
@@ -274,61 +418,125 @@ export default function Workflows() {
     setTemplates([...updated]);
   }
 
-  // ── Merged item list ──────────────────────────────────────────────────────────
+  // ── All active items (tracker + manual workflow tasks) ───────────────────────
   const allItems = useMemo(() => {
-    const lrItems = (data?.requests || []).map(r => normalizeItem(r, 'LR'));
-    const tkItems = trackerItems
-      .filter(t => t.appStatus !== 'completed')
-      .map(t => normalizeItem(t, 'TRACKER'));
-    const mnItems = manualItems
-      .filter(m => m.status !== 'Completed')
-      .map(m => normalizeItem(m, 'MANUAL'));
-    return [...lrItems, ...tkItems, ...mnItems];
-  }, [data, trackerItems, manualItems]);
+    const tkItems = trackerItems.filter(t => t.appStatus !== 'completed').map(t => normalizeItem(t, 'TRACKER'));
+    const mnItems = manualItems.filter(m => m.status !== 'Completed').map(m => normalizeItem(m, 'MANUAL'));
+    return [...tkItems, ...mnItems];
+  }, [trackerItems, manualItems]);
 
-  // ── Filter logic ──────────────────────────────────────────────────────────────
-  const filteredItems = useMemo(() => {
-    let list = allItems;
+  // ── Card-filtered items (used by pipeline + card-filter override in list) ─────
+  const cardFilteredItems = useMemo(() => {
+    if (!activeCardFilter || activeCardFilter === 'active') return allItems;
+    const now = new Date();
+    const weekEnd = new Date(now); weekEnd.setDate(weekEnd.getDate() + 7);
+    const eod = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+    switch (activeCardFilter) {
+      case 'overdue':     return allItems.filter(r => { const d = itemDueDate(r); return d && new Date(d) < now; });
+      case 'dueToday':    return allItems.filter(r => { const d = itemDueDate(r); if (!d) return false; const dd = new Date(d); return dd >= now && dd <= eod; });
+      case 'dueThisWeek': return allItems.filter(r => { const d = itemDueDate(r); if (!d) return false; const dd = new Date(d); return dd >= now && dd <= weekEnd; });
+      case 'withManager': return allItems.filter(r => r.status === 'WITH_MANAGER' || r.pipelineStage === 'manager');
+      case 'withBusiness':return allItems.filter(r => r.status === 'WITH_BUSINESS_DEPARTMENT' || r.pipelineStage === 'business');
+      case 'readyForSig': return allItems.filter(r => r.status === 'READY_FOR_SIGNATURE' || r.pipelineStage === 'signature');
+      case 'awaitingSig': return allItems.filter(r => ['SENT_FOR_SIGNATURE','PARTIALLY_SIGNED'].includes(r.status));
+      case 'noUpdate3':   return allItems.filter(r => { const u = itemLastUpdate(r); return u && new Date(u) < new Date(Date.now() - 3 * 86400000); });
+      case 'unassigned':  return allItems.filter(r => !itemAssignee(r));
+      default: return allItems;
+    }
+  }, [allItems, activeCardFilter]);
 
-    const applyCardFilter = (key) => {
-      const now = new Date(); const weekEnd = new Date(now); weekEnd.setDate(weekEnd.getDate() + 7);
-      switch (key) {
-        case 'overdue':     return list.filter(r => { const d = itemDueDate(r); return d && new Date(d) < now; });
-        case 'dueToday':    return list.filter(r => { const d = itemDueDate(r); if (!d) return false; const dd = new Date(d); const eod = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59); return dd >= now && dd <= eod; });
-        case 'dueThisWeek': return list.filter(r => { const d = itemDueDate(r); if (!d) return false; const dd = new Date(d); return dd >= now && dd <= weekEnd; });
-        case 'withManager': return list.filter(r => r.status === 'WITH_MANAGER' || r.pipelineStage === 'manager');
-        case 'withBusiness':return list.filter(r => r.status === 'WITH_BUSINESS_DEPARTMENT' || r.pipelineStage === 'business');
-        case 'readyForSig': return list.filter(r => r.status === 'READY_FOR_SIGNATURE' || r.pipelineStage === 'signature');
-        case 'awaitingSig': return list.filter(r => ['SENT_FOR_SIGNATURE','PARTIALLY_SIGNED'].includes(r.status));
-        case 'noUpdate3':   return list.filter(r => { const u = itemLastUpdate(r); return u && new Date(u) < new Date(Date.now() - 3 * 86400000); });
-        case 'unassigned':  return list.filter(r => !itemAssignee(r));
-        default: return list;
+  // ── Primary tab counts ────────────────────────────────────────────────────────
+  const tabCounts = useMemo(() => {
+    const activeTk = trackerItems.filter(t => t.appStatus !== 'completed').length;
+    const activeMn = manualItems.filter(m => m.status !== 'Completed').length;
+    return {
+      all:       activeTk + activeMn,
+      tracker:   activeTk,
+      manual:    activeMn,
+      completed: trackerItems.filter(t => t.appStatus === 'completed').length
+                 + manualItems.filter(m => m.status === 'Completed').length,
+      warnings:  (trackerCfg?.warnings || []).length,
+    };
+  }, [trackerItems, manualItems, trackerCfg]);
+
+  // ── Workflow list items (Active Legal Workflows section) ──────────────────────
+  const workflowListItems = useMemo(() => {
+    const q = search.trim().toLowerCase();
+
+    if (activeCardFilter) {
+      let items = cardFilteredItems;
+      if (q) items = items.filter(item => matchesSearch(item, q));
+      return items;
+    }
+
+    if (primaryTab === 'warnings') {
+      return buildWarnings(trackerCfg, secondaryFilter, q);
+    }
+
+    const now = new Date();
+    const weekEnd = new Date(now); weekEnd.setDate(weekEnd.getDate() + 7);
+    const eod = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+    let items = [];
+
+    const applyActiveFilters = (list) => {
+      switch (secondaryFilter) {
+        case 'overdue':      return list.filter(t => { const d = itemDueDate(t); return d && new Date(d) < now; });
+        case 'dueToday':     return list.filter(t => { const d = itemDueDate(t); if (!d) return false; const dd = new Date(d); return dd >= now && dd <= eod; });
+        case 'dueThisWeek':  return list.filter(t => { const d = itemDueDate(t); if (!d) return false; const dd = new Date(d); return dd >= now && dd <= weekEnd; });
+        case 'unassigned':   return list.filter(t => !itemAssignee(t));
+        case 'withManager':  return list.filter(t => t.pipelineStage === 'manager'  || t.status === 'WITH_MANAGER');
+        case 'withBusiness': return list.filter(t => t.pipelineStage === 'business' || t.status === 'WITH_BUSINESS_DEPARTMENT');
+        case 'signature':    return list.filter(t => t.pipelineStage === 'signature' || ['READY_FOR_SIGNATURE','SENT_FOR_SIGNATURE','PARTIALLY_SIGNED'].includes(t.status));
+        case 'noUpdate':     return list.filter(t => { const u = itemLastUpdate(t); return u && new Date(u) < new Date(Date.now() - 3 * 86400000); });
+        default:             return list;
       }
     };
 
-    if (activeCardFilter && activeCardFilter !== 'active') {
-      list = applyCardFilter(activeCardFilter);
-    } else if (!activeCardFilter) {
-      const tab = FILTER_TABS.find(t => t.key === activeTab);
-      if (tab) list = list.filter(tab.filter);
+    if (primaryTab === 'all') {
+      const tkItems = trackerItems.filter(t => t.appStatus !== 'completed').map(t => normalizeItem(t, 'TRACKER'));
+      const mnItems = manualItems.filter(m => m.status !== 'Completed').map(m => normalizeItem(m, 'MANUAL'));
+      items = applyActiveFilters([...tkItems, ...mnItems]);
+    } else if (primaryTab === 'tracker') {
+      items = applyActiveFilters(
+        trackerItems.filter(t => t.appStatus !== 'completed').map(t => normalizeItem(t, 'TRACKER'))
+      );
+    } else if (primaryTab === 'manual') {
+      const base = manualItems.filter(m => m.status !== 'Completed').map(m => normalizeItem(m, 'MANUAL'));
+      if (secondaryFilter === 'assigned')   items = base.filter(m => !!m.assignee);
+      else                                  items = applyActiveFilters(base);
+    } else if (primaryTab === 'completed') {
+      const compTk = trackerItems.filter(t => t.appStatus === 'completed').map(t => normalizeItem(t, 'TRACKER'));
+      const compMn = manualItems.filter(m => m.status === 'Completed').map(m => normalizeItem(m, 'MANUAL'));
+      if (secondaryFilter === 'trackerCompleted')  items = compTk;
+      else if (secondaryFilter === 'manualCompleted') items = compMn;
+      else if (secondaryFilter === 'completedThisWeek') {
+        const weekStart = new Date(now - 7 * 86400000);
+        items = [...compTk, ...compMn].filter(t => {
+          const d = t.completedAt || t.updatedAt || t.lastSyncedAt;
+          return d && new Date(d) >= weekStart;
+        });
+      } else {
+        items = [...compTk, ...compMn];
+      }
     }
 
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      list = list.filter(r => {
-        const a = itemAssignee(r);
-        return (
-          (r.title || r.description || '').toLowerCase().includes(q) ||
-          (r.requestId || r.legalTrackerId || '').toLowerCase().includes(q) ||
-          (r.counterpartyName || r.parties || '').toLowerCase().includes(q) ||
-          (r.department || '').toLowerCase().includes(q) ||
-          (a?.name || '').toLowerCase().includes(q)
-        );
-      });
-    }
+    if (q) items = items.filter(item => matchesSearch(item, q));
+    return items;
+  }, [primaryTab, secondaryFilter, trackerItems, manualItems, trackerCfg, activeCardFilter, cardFilteredItems, search]);
 
-    return list;
-  }, [allItems, activeTab, search, activeCardFilter]);
+  // ── Empty-state message per tab ───────────────────────────────────────────────
+  const emptyStateMsg = (() => {
+    if (activeCardFilter) return 'No workflows match the current filter.';
+    const filtered = secondaryFilter !== 'all' || search.trim();
+    switch (primaryTab) {
+      case 'all':       return filtered ? 'No records match the current filter.' : 'No active tasks found.';
+      case 'tracker':   return filtered ? 'No records match the current filter.' : 'No active tracker tasks found.';
+      case 'manual':    return filtered ? 'No records match the current filter.' : 'No manual workflow tasks found.';
+      case 'completed': return filtered ? 'No records match the current filter.' : 'No completed tasks found.';
+      case 'warnings':  return filtered ? 'No records match the current filter.' : 'No tracker warnings found.';
+      default:          return 'No records match the current filter.';
+    }
+  })();
 
   // ── Merged KPI cards ─────────────────────────────────────────────────────────
   const mergedCards = useMemo(() => {
@@ -370,17 +578,15 @@ export default function Workflows() {
   const pipelineData = useMemo(() => {
     return PIPELINE_COLS.map(col => ({
       ...col,
-      items: filteredItems.filter(item => {
-        if (item._type === 'LR') return col.statuses.includes(item.status);
+      items: cardFilteredItems.filter(item => {
         return item.pipelineStage === col.key;
       }),
     }));
-  }, [filteredItems]);
+  }, [cardFilteredItems]);
 
   // ── Card click handler ────────────────────────────────────────────────────────
   const handleCardClick = (key) => {
     setActiveCardFilter(prev => prev === key ? null : key);
-    setActiveTab('all');
   };
 
   // ── Loading state ─────────────────────────────────────────────────────────────
@@ -393,8 +599,6 @@ export default function Workflows() {
     );
   }
 
-  const { bottlenecks = [] } = data || {};
-
   return (
     <div className="workflows">
       <Header
@@ -405,8 +609,8 @@ export default function Workflows() {
             <button className="wf__refresh-btn" onClick={load} disabled={loading} title="Refresh workflow data">
               {loading ? '…' : '↻'}
             </button>
-            <button className="wf__action-btn" onClick={() => navigate('/legal-requests/new')}>
-              + New Legal Request
+            <button className="wf__action-btn" onClick={() => navigate('/tasks')}>
+              Open Tasks
             </button>
           </>
         }
@@ -472,49 +676,73 @@ export default function Workflows() {
             </div>
             <input
               className="wf__search"
-              placeholder="Search by title, reference, owner, counterparty…"
+              placeholder="Search title, reference, owner, parties, status…"
               value={search}
               onChange={e => setSearch(e.target.value)}
             />
           </div>
 
+          {/* Primary tab row — hidden when a KPI card filter is active */}
           {!activeCardFilter && (
-            <div className="wf__filter-tabs">
-              {FILTER_TABS.map(t => (
-                <button
-                  key={t.key}
-                  className={`wf__filter-tab${activeTab === t.key ? ' wf__filter-tab--active' : ''}`}
-                  onClick={() => setActiveTab(t.key)}
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
+            <>
+              <div className="wf__primary-tabs">
+                {PRIMARY_TABS.map(pt => (
+                  <button
+                    key={pt.key}
+                    className={`wf__primary-tab${primaryTab === pt.key ? ' wf__primary-tab--active' : ''}`}
+                    onClick={() => { setPrimaryTab(pt.key); setSecondaryFilter('all'); }}
+                  >
+                    {pt.label}
+                    <span className="wf__primary-tab-count">{tabCounts[pt.key] ?? 0}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Secondary filter chips */}
+              <div className="wf__secondary-filters">
+                {(SECONDARY_FILTERS[primaryTab] || []).map(sf => (
+                  <button
+                    key={sf.key}
+                    className={`wf__secondary-chip${secondaryFilter === sf.key ? ' wf__secondary-chip--active' : ''}`}
+                    onClick={() => setSecondaryFilter(sf.key)}
+                  >
+                    {sf.label}
+                  </button>
+                ))}
+              </div>
+            </>
           )}
 
-          {filteredItems.length === 0 ? (
-            <div className="wf__empty">No workflows match the current filter.</div>
+          {/* Content */}
+          {workflowListItems.length === 0 ? (
+            <div className="wf__empty">{emptyStateMsg}</div>
+          ) : primaryTab === 'warnings' && !activeCardFilter ? (
+            <div className="wf__warn-list">
+              {workflowListItems.map(w => (
+                <WarningRow key={w.id} warning={w} onRetrySync={handleSyncTracker} />
+              ))}
+            </div>
           ) : (
             <div className="wf__workflow-list">
               <div className="wf__workflow-header-row">
-                <span>Request / Task</span>
+                <span>Workflow Task</span>
                 <span>Stage / Status</span>
                 <span>Owner</span>
-                <span>Due</span>
+                <span>{primaryTab === 'completed' ? 'Completion' : 'Due'}</span>
                 <span>Actions</span>
               </div>
-              {filteredItems.map(item => {
-                if (item._type === 'LR') {
-                  return <WorkflowRow key={item._id} request={item} onClick={() => navigate(`/legal-requests/${item._id}`)} />;
-                }
+              {workflowListItems.map(item => {
+                const isCompleted = item.appStatus === 'completed' || item.status === 'Completed';
                 if (item._type === 'TRACKER') {
                   return (
                     <TrackerTaskRow
                       key={item.id}
                       task={item}
                       isManager={isManager}
+                      isCompleted={isCompleted}
+                      onRowClick={() => setDrawerTask(item)}
                       onAssign={() => handleOpenAssign(item)}
-                      onComplete={() => handleCompleteTrackerTask(item)}
+                      onComplete={() => handleOpenDoneConfirm(item)}
                     />
                   );
                 }
@@ -523,8 +751,10 @@ export default function Workflows() {
                     key={item.id}
                     task={item}
                     isManager={isManager}
+                    isCompleted={isCompleted}
+                    onRowClick={() => setDrawerTask(item)}
                     onAssign={() => handleOpenAssign(item)}
-                    onComplete={() => handleCompleteManualTask(item)}
+                    onComplete={() => handleOpenDoneConfirm(item)}
                   />
                 );
               })}
@@ -535,26 +765,13 @@ export default function Workflows() {
         {/* ── Workflow Pipeline ───────────────────────────────────────────── */}
         <div className="wf__section">
           <h2 className="wf__section-title">Workflow Pipeline</h2>
-          <p className="wf__section-sub">Requests and tracker tasks grouped by workflow stage. Wide columns indicate bottlenecks.</p>
+          <p className="wf__section-sub">Tracker and manual tasks grouped by workflow stage. Wide columns indicate bottlenecks.</p>
           <div className="wf__pipeline">
             {pipelineData.map(col => (
-              <PipelineColumn key={col.key} col={col} navigate={navigate} />
+              <PipelineColumn key={col.key} col={col} />
             ))}
           </div>
         </div>
-
-        {/* ── Bottlenecks ─────────────────────────────────────────────────── */}
-        {bottlenecks.some(b => b.count > 0) && (
-          <div className="wf__section">
-            <h2 className="wf__section-title">Bottlenecks</h2>
-            <p className="wf__section-sub">Where legal requests are currently stuck.</p>
-            <div className="wf__bottlenecks">
-              {bottlenecks.filter(b => b.count > 0).map(b => (
-                <BottleneckCard key={b.status} b={b} onClick={() => navigate(`/legal-requests?status=${b.status}`)} />
-              ))}
-            </div>
-          </div>
-        )}
 
         {/* ── Workflow Templates ──────────────────────────────────────────── */}
         <div className="wf__section">
@@ -616,6 +833,40 @@ export default function Workflows() {
           onUpdate={handleTemplateUpdate}
         />
       )}
+
+      {/* ── Row details drawer ──────────────────────────────────────────────── */}
+      {drawerTask && (
+        <TrackerRowDrawer
+          task={drawerTask}
+          isManager={isManager}
+          syncing={syncing}
+          onClose={() => setDrawerTask(null)}
+          onSaved={handleDrawerRowSaved}
+          onAssign={() => {
+            const t = drawerTask;
+            setDrawerTask(null);
+            setAssignTarget({ ...t, _type: t._type || 'TRACKER' });
+            setShowAssign(true);
+          }}
+          onComplete={() => handleOpenDoneConfirm(drawerTask)}
+          onOpenTracker={handleOpenTracker}
+        />
+      )}
+
+      {/* ── Done confirmation modal ─────────────────────────────────────────── */}
+      {doneTarget && (
+        <DoneConfirmModal
+          task={doneTarget}
+          onClose={() => setDoneTarget(null)}
+          onConfirmed={() => {
+            if (doneTarget._type === 'TRACKER' || doneTarget.sourceType === 'LEGAL_TRACKER') {
+              handleDoneConfirmed(doneTarget);
+            } else {
+              handleCompleteManualTask(doneTarget);
+            }
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -634,61 +885,20 @@ function WfCard({ label, value, color, active, onClick, urgent }) {
   );
 }
 
-function WorkflowRow({ request: r, onClick }) {
-  const days    = getDaysLabel(r.dueDate);
-  const stsClr  = STATUS_COLORS[r.status] || { bg: '#f8fafc', color: '#475569' };
-  const priClr  = PRIORITY_COLORS[r.priority] || PRIORITY_COLORS.MEDIUM;
-  const hldClr  = HOLDER_COLORS[r.currentHolder] || '#94a3b8';
-  const initials = r.assignedTo?.name?.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) || '—';
-
-  return (
-    <div className={`wf__workflow-row${days?.cls === 'overdue' ? ' wf__workflow-row--overdue' : ''}`} onClick={onClick}>
-      <div className="wf__row-request">
-        <div className="wf__row-badges">
-          <span className="wf__source-badge wf__source-badge--lr">LR</span>
-          <span className={`wf__track-badge wf__track-badge--${r.internalOrExternal?.toLowerCase()}`}>
-            {r.internalOrExternal === 'INTERNAL' ? 'INT' : 'EXT'}
-          </span>
-          <span className="wf__priority-badge" style={{ background: priClr.bg, color: priClr.color }}>
-            {r.priority}
-          </span>
-        </div>
-        <span className="wf__row-ref">{r.requestId}</span>
-        <span className="wf__row-title">{r.title}</span>
-        <span className="wf__row-type">{REQUEST_TYPE_LABELS[r.requestType] || r.requestType}</span>
-      </div>
-      <div className="wf__row-stage">
-        <span className="wf__status-pill" style={{ background: stsClr.bg, color: stsClr.color }}>
-          {STATUS_LABELS[r.status] || r.status}
-        </span>
-        <span className="wf__holder-pill" style={{ color: hldClr }}>
-          {HOLDER_LABELS[r.currentHolder] || r.currentHolder}
-        </span>
-      </div>
-      <div className="wf__row-owner">
-        {r.assignedTo ? (
-          <>
-            <span className="wf__owner-avatar">{initials}</span>
-            <span className="wf__owner-name">{r.assignedTo.name}</span>
-          </>
-        ) : <span className="wf__unassigned">Unassigned</span>}
-      </div>
-      <div className="wf__row-due">
-        {days ? <span className={`wf__days wf__days--${days.cls}`}>{days.label}</span> : '—'}
-      </div>
-      <div className="wf__row-action">
-        {r.nextAction && <span className="wf__next-action">{r.nextAction}</span>}
-      </div>
-    </div>
-  );
-}
-
-function TrackerTaskRow({ task: t, isManager, onAssign, onComplete }) {
-  const dueState = t.dueState || calcDueState(t.deadline);
+function TrackerTaskRow({ task: t, isManager, isCompleted, onRowClick, onAssign, onComplete }) {
+  const outcome  = isCompleted ? getCompletionOutcome(t) : null;
+  const dueState = isCompleted ? null : (t.dueState || calcDueState(t.deadline));
   const assigneeInitials = t.assignee?.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) || null;
 
+  let rowClass = 'wf__workflow-row wf__tracker-row wf__workflow-row--clickable';
+  if (isCompleted) {
+    rowClass += outcome?.tone === 'warning' ? ' wf__workflow-row--completed-late' : ' wf__workflow-row--completed';
+  } else if (dueState === 'overdue') {
+    rowClass += ' wf__workflow-row--overdue';
+  }
+
   return (
-    <div className={`wf__workflow-row wf__tracker-row${dueState === 'overdue' ? ' wf__workflow-row--overdue' : ''}`}>
+    <div className={rowClass} onClick={onRowClick} role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && onRowClick?.()}>
       <div className="wf__row-request">
         <div className="wf__row-badges">
           <span className="wf__source-badge wf__source-badge--tracker">Tracker</span>
@@ -713,7 +923,12 @@ function TrackerTaskRow({ task: t, isManager, onAssign, onComplete }) {
         ) : <span className="wf__unassigned">Unassigned</span>}
       </div>
       <div className="wf__row-due">
-        {t.deadline ? (
+        {isCompleted ? (
+          <div className="wf__completion-cell">
+            <span className={`wf__days wf__days--completion-${outcome.tone}`}>{outcome.label}</span>
+            {outcome.detail && <span className="wf__completion-detail">{outcome.detail}</span>}
+          </div>
+        ) : t.deadline ? (
           <span className={`wf__days wf__days--${dueState}`}>
             {dueState === 'overdue' ? 'Overdue'
               : dueState === 'today' ? 'Due today'
@@ -725,25 +940,36 @@ function TrackerTaskRow({ task: t, isManager, onAssign, onComplete }) {
         ) : '—'}
       </div>
       <div className="wf__row-action">
-        {isManager && (
+        {!isCompleted && isManager && (
           <button className="wf__row-btn wf__row-btn--assign" onClick={e => { e.stopPropagation(); onAssign(); }}>
             Assign
           </button>
         )}
-        <button className="wf__row-btn wf__row-btn--done" onClick={e => { e.stopPropagation(); onComplete(); }}>
-          Done
-        </button>
+        {!isCompleted && (
+          <button className="wf__row-btn wf__row-btn--done" onClick={e => { e.stopPropagation(); onComplete(); }}>
+            Done
+          </button>
+        )}
+        {isCompleted && <span className="wf__completed-badge">Completed</span>}
       </div>
     </div>
   );
 }
 
-function ManualTaskRow({ task: t, isManager, onAssign, onComplete }) {
-  const dueState = calcDueState(t.dueDate);
+function ManualTaskRow({ task: t, isManager, isCompleted, onRowClick, onAssign, onComplete }) {
+  const outcome  = isCompleted ? getCompletionOutcome(t) : null;
+  const dueState = isCompleted ? null : calcDueState(t.dueDate);
   const assigneeInitials = t.assignee?.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2) || null;
 
+  let rowClass = 'wf__workflow-row wf__manual-row wf__workflow-row--clickable';
+  if (isCompleted) {
+    rowClass += outcome?.tone === 'warning' ? ' wf__workflow-row--completed-late' : ' wf__workflow-row--completed';
+  } else if (dueState === 'overdue') {
+    rowClass += ' wf__workflow-row--overdue';
+  }
+
   return (
-    <div className={`wf__workflow-row wf__manual-row${dueState === 'overdue' ? ' wf__workflow-row--overdue' : ''}`}>
+    <div className={rowClass} onClick={onRowClick} role="button" tabIndex={0} onKeyDown={e => e.key === 'Enter' && onRowClick?.()}>
       <div className="wf__row-request">
         <div className="wf__row-badges">
           <span className="wf__source-badge wf__source-badge--manual">Manual</span>
@@ -767,27 +993,60 @@ function ManualTaskRow({ task: t, isManager, onAssign, onComplete }) {
         ) : <span className="wf__unassigned">Unassigned</span>}
       </div>
       <div className="wf__row-due">
-        {t.dueDate ? (
+        {isCompleted ? (
+          <div className="wf__completion-cell">
+            <span className={`wf__days wf__days--completion-${outcome.tone}`}>{outcome.label}</span>
+            {outcome.detail && <span className="wf__completion-detail">{outcome.detail}</span>}
+          </div>
+        ) : t.dueDate ? (
           <span className={`wf__days wf__days--${dueState}`}>
             {dueState === 'overdue' ? 'Overdue' : new Date(t.dueDate).toLocaleDateString('en-ZA')}
           </span>
         ) : '—'}
       </div>
       <div className="wf__row-action">
-        {isManager && (
+        {!isCompleted && isManager && (
           <button className="wf__row-btn wf__row-btn--assign" onClick={e => { e.stopPropagation(); onAssign(); }}>
             Assign
           </button>
         )}
-        <button className="wf__row-btn wf__row-btn--done" onClick={e => { e.stopPropagation(); onComplete(); }}>
-          Done
-        </button>
+        {!isCompleted && (
+          <button className="wf__row-btn wf__row-btn--done" onClick={e => { e.stopPropagation(); onComplete(); }}>
+            Done
+          </button>
+        )}
+        {isCompleted && <span className="wf__completed-badge">Completed</span>}
       </div>
     </div>
   );
 }
 
-function PipelineColumn({ col, navigate }) {
+function WarningRow({ warning, onRetrySync }) {
+  const clrMap = {
+    Error:   { bg: '#fef2f2', color: '#dc2626', border: '#fca5a5' },
+    Warning: { bg: '#fffbeb', color: '#92400e', border: '#fde68a' },
+    Info:    { bg: '#eff6ff', color: '#1d4ed8', border: '#bfdbfe' },
+  };
+  const clr = clrMap[warning.severity] || clrMap.Warning;
+  return (
+    <div className="wf__warn-row" style={{ borderLeftColor: clr.border }}>
+      <div className="wf__warn-header">
+        <span className="wf__warn-badge" style={{ background: clr.bg, color: clr.color }}>{warning.severity}</span>
+        <span className="wf__warn-source">Legal Tracker</span>
+        {warning.rowNumber != null && <span className="wf__warn-row-num">Row {warning.rowNumber}</span>}
+      </div>
+      <p className="wf__warn-msg">{warning.message}</p>
+      {warning.suggestedFix && <p className="wf__warn-fix">Fix: {warning.suggestedFix}</p>}
+      {warning.type === 'spreadsheetSync' && (
+        <div className="wf__warn-actions">
+          <button className="wf__row-btn wf__row-btn--assign" onClick={onRetrySync}>Retry Sync</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PipelineColumn({ col }) {
   const hasItems = col.items.length > 0;
   return (
     <div className={`wf__pipe-col${hasItems ? ' wf__pipe-col--has-items' : ''}`}>
@@ -799,25 +1058,21 @@ function PipelineColumn({ col, navigate }) {
       </div>
       <div className="wf__pipe-items">
         {col.items.slice(0, 4).map(item => {
-          const isLR   = item._type === 'LR';
-          const title  = isLR ? item.title : (item.description || item.title || 'Tracker Task');
-          const ref    = isLR ? item.requestId : item.legalTrackerId;
-          const due    = isLR ? item.dueDate : (item.deadline || item.dueDate);
+          const title  = item.description || item.title || 'Tracker Task';
+          const ref    = item.legalTrackerId || item.workflowTaskId || item.id;
+          const due    = item.deadline || item.dueDate;
           const days   = getDaysLabel(due);
-          const assignee = isLR ? item.assignedTo : (item.assignee ? { name: item.assignee } : null);
+          const assignee = item.assignee ? { name: item.assignee } : null;
           return (
             <div
               key={item._id || item.id}
               className="wf__pipe-item"
-              onClick={() => isLR && navigate(`/legal-requests/${item._id}`)}
-              style={!isLR ? { cursor: 'default' } : undefined}
+              style={{ cursor: 'default' }}
             >
               <div className="wf__pipe-item-badges">
-                {!isLR && (
-                  <span className={`wf__pipe-source wf__pipe-source--${item._type?.toLowerCase()}`}>
-                    {item._type === 'TRACKER' ? 'T' : 'M'}
-                  </span>
-                )}
+                <span className={`wf__pipe-source wf__pipe-source--${item._type?.toLowerCase()}`}>
+                  {item._type === 'TRACKER' ? 'T' : 'M'}
+                </span>
                 <span className="wf__pipe-ref">{ref}</span>
               </div>
               <span className="wf__pipe-title">{title}</span>
@@ -835,28 +1090,13 @@ function PipelineColumn({ col, navigate }) {
         {col.items.length > 4 && (
           <button
             className="wf__pipe-more"
-            onClick={() => col.statuses?.length && navigate(`/legal-requests?status=${col.statuses[0]}`)}
+            type="button"
           >
             +{col.items.length - 4} more →
           </button>
         )}
         {col.items.length === 0 && <div className="wf__pipe-empty">—</div>}
       </div>
-    </div>
-  );
-}
-
-function BottleneckCard({ b, onClick }) {
-  return (
-    <div className="wf__bottleneck" onClick={onClick}>
-      <div className="wf__bottleneck-header">
-        <span className="wf__bottleneck-label">{b.label}</span>
-        <span className="wf__bottleneck-count">{b.count}</span>
-      </div>
-      <div className="wf__bottleneck-meta">
-        <span>Avg wait: <strong>{b.avgWaitDays}d</strong></span>
-      </div>
-      {b.oldest && <div className="wf__bottleneck-oldest">Oldest: {b.oldest.title}</div>}
     </div>
   );
 }

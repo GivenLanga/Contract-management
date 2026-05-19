@@ -22,11 +22,6 @@ const APP_ENTITY_WITH_TECH_HINT = /(?:\b(contract|document|task|template|signing
 
 const HELP_FILE_PATTERNS = [
   /^SETUP\.md$/,
-  /^src\/ai\/config\/legalWorkflowSla\.js$/,
-  /^src\/models\/LegalRequest\.js$/,
-  /^src\/models\/SignatureRequest\.js$/,
-  /^src\/models\/Signatory\.js$/,
-  /^src\/services\/legalWorkflowService\.js$/,
   /^src\/services\/signingService\.js$/,
 ];
 
@@ -266,13 +261,7 @@ class BackendKnowledgeRagService {
     if (relPath === 'SETUP.md') {
       return this._helpTextChunks(relPath, 'Setup guide', text);
     }
-    if (relPath === 'src/ai/config/legalWorkflowSla.js') {
-      return this._slaHelpChunks(relPath, text);
-    }
-    if (relPath === 'src/models/LegalRequest.js' || relPath === 'src/services/legalWorkflowService.js') {
-      return this._workflowHelpChunks(relPath, text);
-    }
-    if (relPath === 'src/models/SignatureRequest.js' || relPath === 'src/models/Signatory.js' || relPath === 'src/services/signingService.js') {
+    if (relPath === 'src/services/signingService.js') {
       return this._signingHelpChunks(relPath, text);
     }
 
@@ -337,42 +326,6 @@ class BackendKnowledgeRagService {
     const clean = normalizeText(text).slice(0, MAX_CHUNK_CHARS);
     if (!clean) return [];
     return [this._makeChunk({ title, sourcePath: relPath, sourceLabel: title, audience: 'help', text: clean })];
-  }
-
-  _workflowHelpChunks(relPath, text) {
-    const statusesMatch = text.match(/const ALL_STATUSES = \[([\s\S]*?)\];/);
-    const statuses = statusesMatch
-      ? [...statusesMatch[1].matchAll(/'([^']+)'/g)].map((match) => match[1])
-      : [];
-    const safeStatusText = statuses.length
-      ? `Workflow statuses include: ${statuses.join(', ')}.`
-      : 'Workflow records move through submitted, review, approval, signature, storage, closure, hold, and cancellation states.';
-
-    return [this._makeChunk({
-      title: 'Legal workflow help',
-      sourcePath: relPath,
-      sourceLabel: 'Workflow help',
-      audience: 'help',
-      text: [
-        safeStatusText,
-        'Operational due dates use dueDate. targetDate is the original calculated target date and may differ when dueDate is overridden.',
-        'Signature progress is tracked with signatureEmailSentAt, pendingSignatoriesCount, completedSignatoriesCount, isFullySigned, and fullySignedAt.',
-        'Workflow history records status, holder, assignment, due-date, document, task, signature, and comment events as a timeline.',
-        'Live workflow records must be accessed through AI tools so RBAC and DataScope filters can be applied.',
-      ].join(' '),
-    })];
-  }
-
-  _slaHelpChunks(relPath, text) {
-    const entries = [...text.matchAll(/([A-Z_]+):\s*(\d+)/g)]
-      .map((match) => `${match[1]}=${match[2]}`);
-    return [this._makeChunk({
-      title: 'Legal workflow SLA help',
-      sourcePath: relPath,
-      sourceLabel: 'Workflow SLA help',
-      audience: 'help',
-      text: `Central legal workflow SLA thresholds: ${entries.join(', ')}. External turnaround is met when a request is completed or sent for signature within the configured threshold; signature completion is tracked separately.`,
-    })];
   }
 
   _signingHelpChunks(relPath, text) {

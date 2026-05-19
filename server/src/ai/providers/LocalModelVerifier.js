@@ -19,7 +19,7 @@ function defaultResolveRuntimePackage(packageName) {
 
 const toolRegistry = {
   get(name) {
-    return name === 'get_due_today'
+    return name === 'list_my_tasks'
       ? { name, schema: { type: 'object', additionalProperties: false, properties: {} } }
       : null;
   },
@@ -227,7 +227,7 @@ class LocalModelVerifier {
     result.jsonPromptPassed = jsonObject?.status === 'ready';
     if (!result.jsonPromptPassed) result.errors.push('Local model loaded, but failed the JSON format test.');
 
-    const toolPrompt = 'You are a tool-calling assistant.\nReturn only this JSON object and nothing else:\n{"type":"tool_call","toolName":"get_due_today","args":{}}';
+    const toolPrompt = 'You are a tool-calling assistant.\nReturn only this JSON object and nothing else:\n{"type":"tool_call","toolName":"list_my_tasks","args":{}}';
     const tool = await runtimeClient.generate({
       messages: [{ role: 'user', content: toolPrompt }],
       maxTokens: 96,
@@ -237,7 +237,7 @@ class LocalModelVerifier {
       tool.type === 'tool_call' ? tool : { type: 'assistant_message', content: extractText(tool) },
       toolRegistry
     );
-    result.toolCallPromptPassed = parsedTool?.toolName === 'get_due_today';
+    result.toolCallPromptPassed = parsedTool?.toolName === 'list_my_tasks';
     if (!result.toolCallPromptPassed) result.errors.push('Model loaded, but failed tool-call format test.');
   }
 

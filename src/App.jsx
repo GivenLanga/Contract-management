@@ -27,9 +27,6 @@ import SigningEnvelope from './components/Signing/SigningEnvelope';
 import ExternalSigningPage from './components/Signing/ExternalSigningPage';
 import AIAssistant from './components/AI/AIAssistant';
 import NotificationCenter from './components/Notifications/NotificationCenter';
-import IntakeForm from './components/LegalRequests/IntakeForm';
-import LegalRequestList from './components/LegalRequests/LegalRequestList';
-import LegalRequestDetail from './components/LegalRequests/LegalRequestDetail';
 
 import './App.css';
 
@@ -102,9 +99,7 @@ function AppShell() {
                 <Route path="/ai" element={<AIAssistant />} />
                 <Route path="/notifications" element={<NotificationCenter />} />
                 <Route path="/reports" element={<Reports />} />
-                <Route path="/legal-requests"      element={<LegalRequestList />} />
-                <Route path="/legal-requests/new" element={<IntakeForm />} />
-                <Route path="/legal-requests/:id" element={<LegalRequestDetail />} />
+                <Route path="/legal-requests/*" element={<Navigate to="/workflows" replace />} />
                 <Route path="/settings" element={<Settings />} />
                 <Route path="/login" element={<Navigate to="/" replace />} />
                 <Route path="*" element={<Navigate to="/" replace />} />

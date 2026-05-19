@@ -28,6 +28,13 @@
   transition: background 0.15s;
 }
 .tl__new-btn:hover { background: #1d4ed8; }
+.tl__new-btn--secondary {
+  background: #f0f9ff;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+  margin-right: 8px;
+}
+.tl__new-btn--secondary:hover { background: #e0f2fe; }
 
 /* ── Summary cards ───────────────────────────────────────────────────────────── */
 .tl__stats {
@@ -77,6 +84,12 @@
   justify-content: space-between;
   gap: 16px;
   flex-wrap: wrap;
+}
+
+.tl__toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .tl__tabs {
@@ -263,3 +276,94 @@
 .tl__action--confirm-yes:hover { background: #b91c1c; }
 .tl__action--confirm-no   { background: #f1f5f9; color: #475569; }
 .tl__action--confirm-no:hover  { background: #e2e8f0; }
+.tl__action--retry    { background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; }
+.tl__action--retry:hover { background: #ffedd5; }
+.tl__action--workflows { background: #f0f9ff; color: #0369a1; border: 1px solid #bae6fd; }
+.tl__action--workflows:hover { background: #e0f2fe; }
+.tl__action--assign   { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+.tl__action--assign:hover { background: #dcfce7; }
+
+/* ── Source badges ───────────────────────────────────────────────────────────── */
+.tl__source-badge {
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .3px;
+  white-space: nowrap;
+}
+.tl__source-badge--tracker  { background: #e0f2fe; color: #0369a1; }
+.tl__source-badge--manual   { background: #f3e8ff; color: #7c3aed; }
+.tl__source-badge--lr       { background: #fef9c3; color: #92400e; }
+.tl__source-badge--sig      { background: #d1fae5; color: #065f46; }
+
+/* ── Tracker context column ──────────────────────────────────────────────────── */
+.tl__tracker-context { display: flex; flex-direction: column; gap: 2px; }
+.tl__lr-workbook { font-size: 10px; color: #94a3b8; font-family: monospace; margin-top: 1px; }
+
+/* ── Sync status ─────────────────────────────────────────────────────────────── */
+.tl__sync-status {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  width: fit-content;
+  margin-top: 2px;
+}
+.tl__sync-status--sync-failed  { background: #fef2f2; color: #dc2626; }
+.tl__sync-status--sync-pending { background: #fff7ed; color: #c2410c; }
+.tl__sync-status--local-only   { background: #f8fafc; color: #64748b; }
+.tl__sync-status--conflict     { background: #fefce8; color: #a16207; }
+.tl__sync-status--synced       { background: #f0fdf4; color: #15803d; }
+
+/* ── Row states ──────────────────────────────────────────────────────────────── */
+.tl__row--sync-failed { border-left: 3px solid #f97316; }
+
+/* ── Completed filter dropdown ───────────────────────────────────────────────── */
+.tl__completed-filter {
+  padding: 8px 12px;
+  border: 1.5px solid #d1d5db;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #374151;
+  background: #fff;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s;
+  margin-bottom: 2px;
+}
+.tl__completed-filter:focus { border-color: #2563eb; }
+
+/* ── Dev debug panel ─────────────────────────────────────────────────────────── */
+.tl__debug-panel {
+  border: 1px dashed #fbbf24;
+  border-radius: 8px;
+  background: #fffbeb;
+  margin-bottom: 12px;
+}
+.tl__debug-toggle {
+  padding: 10px 14px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  color: #92400e;
+  list-style: none;
+}
+.tl__debug-body {
+  padding: 8px 14px 12px;
+  font-size: 12px;
+  color: #78350f;
+  line-height: 1.7;
+}
+.tl__debug-body p { margin: 0; }
+
+/* ── Completed late badge ────────────────────────────────────────────────────── */
+.tl__completed-late {
+  background: #fff7ed;
+  color: #c2410c;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  width: fit-content;
+}

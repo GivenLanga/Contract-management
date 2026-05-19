@@ -2116,7 +2116,7 @@ router.post('/:docId/request', protect, async (req, res) => {
       userAgent: req.get('User-Agent'),
     });
 
-    const appUrl = process.env.APP_URL || 'http://localhost:5173';
+    const appUrl = process.env.APP_URL || 'http://localhost:5174';
     const devPreview = process.env.NODE_ENV === 'development'
       ? {
           enabled: true,

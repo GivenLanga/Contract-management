@@ -5,10 +5,10 @@ const assert = require('node:assert/strict');
 
 const documentTools = require('../src/ai/tools/documents.tools');
 const taskTools = require('../src/ai/tools/tasks.tools');
-const workflowTools = require('../src/ai/tools/workflow.tools');
+const overviewTools = require('../src/ai/tools/overview.tools');
+const Contract = require('../src/models/Contract');
 const Document = require('../src/models/Document');
 const Task = require('../src/models/Task');
-const LegalRequest = require('../src/models/LegalRequest');
 
 const findTool = (tools, name) => tools.find((tool) => tool.name === name);
 
@@ -42,151 +42,75 @@ test('get_task_summary returns structured task_summary, not legacy Done-prone su
   }
 });
 
-test('get_legal_team_progress returns report_summary with useful metrics', async () => {
-  const originalLrCount = LegalRequest.countDocuments;
-  const originalLrFind = LegalRequest.find;
+test('query_reports_summary returns workflow/task metrics without request metrics', async () => {
+  const originalContractCount = Contract.countDocuments;
+  const originalDocumentCount = Document.countDocuments;
   const originalTaskCount = Task.countDocuments;
 
-  const counts = [14, 9, 11, 2, 4, 1, 1, 3];
-  let lrIndex = 0;
-  LegalRequest.countDocuments = async () => counts[lrIndex++] ?? 0;
-  Task.countDocuments = async () => 7;
-  LegalRequest.find = () => ({
-    select: () => ({
-      lean: async () => [
-        { internalOrExternal: 'INTERNAL', submittedAt: new Date(), completedAt: new Date(), legalWorkingDays: 2 },
-        { internalOrExternal: 'EXTERNAL', submittedAt: new Date(), completedAt: new Date(), legalWorkingDays: 6 },
-      ],
-    }),
-  });
+  const contractCounts = [5, 1];
+  const documentCounts = [3, 2, 4];
+  const taskCounts = [7, 2, 4];
+  Contract.countDocuments = async () => contractCounts.shift() ?? 0;
+  Document.countDocuments = async () => documentCounts.shift() ?? 0;
+  Task.countDocuments = async () => taskCounts.shift() ?? 0;
 
   try {
-    const tool = findTool(workflowTools, 'get_legal_team_progress');
-    const result = await tool.execute({ period: 'this_month' }, { user: { role: 'admin' } });
+    const tool = findTool(overviewTools, 'query_reports_summary');
+    const result = await tool.execute({ reportType: 'tasks', period: 'this_month' }, { user: { role: 'admin' } });
 
     assert.equal(result.type, 'report_summary');
-    assert.equal(result.category, 'legal_team_progress');
-    assert.equal(result.metrics.submitted, 14);
-    assert.equal(result.metrics.completed, 9);
-    assert.equal(result.metrics.overdue, 2);
-    assert.equal(result.metrics.slaCompliance, 100);
-    assert.match(result.summary, /Legal progress/i);
+    assert.equal(result.category, 'tasks');
+    assert.equal(result.metrics.openTasks, 7);
+    assert.equal(result.metrics.overdueTasks, 2);
+    assert.equal(result.metrics.workflowTasks, 4);
+    assert.equal(Object.hasOwn(result.metrics, 'openRequests'), false);
   } finally {
-    LegalRequest.countDocuments = originalLrCount;
-    LegalRequest.find = originalLrFind;
+    Contract.countDocuments = originalContractCount;
+    Document.countDocuments = originalDocumentCount;
     Task.countDocuments = originalTaskCount;
   }
 });
 
-test('query_legal_requests applies urgent filter and returns structured legal_request_summary', async () => {
-  const originalCount = LegalRequest.countDocuments;
-  const originalFind = LegalRequest.find;
+test('query_tasks applies tracker workflow filters and returns structured task_summary', async () => {
+  const originalCount = Task.countDocuments;
+  const originalFind = Task.find;
 
-  LegalRequest.countDocuments = async (filter) => {
-    assert.match(JSON.stringify(filter), /URGENT/);
+  Task.countDocuments = async (filter) => {
+    assert.match(JSON.stringify(filter), /LEGAL_TRACKER/);
     return 1;
   };
-  LegalRequest.find = () => ({
-    select: () => ({
-      populate: () => ({
-        populate: () => ({
-          sort: () => ({
-            limit: () => ({
-              lean: async () => [{
-                _id: 'lr1',
-                requestId: 'LR-2026-00001',
-                title: 'Urgent Finance Addendum',
-                requestType: 'EXTERNAL_CONTRACT',
-                status: 'SUBMITTED',
-                priority: 'URGENT',
-                department: 'Finance',
-                dueDate: new Date('2026-05-16T00:00:00.000Z'),
-                targetDate: new Date('2026-05-16T00:00:00.000Z'),
-                submittedAt: new Date('2026-05-12T00:00:00.000Z'),
-                reasonForRequest: 'Addendum for facility terms',
-                assignedTo: { name: 'Legal User' },
-                submittedBy: { name: 'Finance User' },
-              }],
-            }),
-          }),
-        }),
-      }),
-    }),
-  });
+  Task.find = () => {
+    const chain = {
+      populate: () => chain,
+      sort: () => chain,
+      limit: () => chain,
+      lean: async () => [{
+        _id: 'task1',
+        title: 'Review tracker row',
+        status: 'Pending',
+        priority: 'Urgent',
+        deadline: new Date('2026-05-16T00:00:00.000Z'),
+        type: 'LEGAL_REVIEW',
+        sourceType: 'LEGAL_TRACKER',
+        assignedTo: { name: 'Legal User' },
+      }],
+    };
+    return chain;
+  };
 
   try {
-    const tool = findTool(workflowTools, 'query_legal_requests');
+    const tool = findTool(taskTools, 'query_tasks');
     const result = await tool.execute({
-      filters: { priority: 'URGENT', urgentOnly: true },
-      period: 'all',
+      filters: { sourceType: 'LEGAL_TRACKER', overdueOnly: true },
       limit: 20,
     }, { userId: 'u1', user: { _id: 'u1', role: 'admin' } });
 
-    assert.equal(result.type, 'legal_request_summary');
+    assert.equal(result.type, 'task_summary');
     assert.equal(result.metrics.count, 1);
-    assert.equal(result.items[0].priority, 'URGENT');
-    assert.match(result.summary, /urgent legal request/i);
+    assert.equal(result.items[0].sourceType, 'LEGAL_TRACKER');
     assert.doesNotMatch(result.summary, /^Done\.?$/i);
   } finally {
-    LegalRequest.countDocuments = originalCount;
-    LegalRequest.find = originalFind;
-  }
-});
-
-test('query_legal_requests returns Finance requested fields as table_summary', async () => {
-  const originalCount = LegalRequest.countDocuments;
-  const originalFind = LegalRequest.find;
-
-  LegalRequest.countDocuments = async (filter) => {
-    assert.ok(filter);
-    return 1;
-  };
-  LegalRequest.find = () => ({
-    select: () => ({
-      populate: () => ({
-        populate: () => ({
-          sort: () => ({
-            limit: () => ({
-              lean: async () => [{
-                _id: 'lr2',
-                requestId: 'LR-2026-00002',
-                title: 'Finance Service Agreement',
-                requestType: 'SERVICE_PROVIDER_AGREEMENT',
-                documentCategory: 'Agreement',
-                status: 'IN_LEGAL_REVIEW',
-                priority: 'HIGH',
-                department: 'Finance',
-                dueDate: new Date('2026-05-16T00:00:00.000Z'),
-                targetDate: new Date('2026-05-16T00:00:00.000Z'),
-                submittedAt: new Date('2026-05-12T00:00:00.000Z'),
-                reasonForRequest: 'Review payment services terms',
-                assignedTo: { name: 'Legal User' },
-                submittedBy: { name: 'Finance User' },
-              }],
-            }),
-          }),
-        }),
-      }),
-    }),
-  });
-
-  try {
-    const tool = findTool(workflowTools, 'query_legal_requests');
-    const result = await tool.execute({
-      filters: { department: 'Finance' },
-      requestedFields: ['title', 'description', 'requestType', 'dueDate', 'targetDate'],
-      answerShape: 'table',
-      period: 'all',
-      limit: 20,
-    }, { userId: 'u1', user: { _id: 'u1', role: 'admin' } });
-
-    assert.equal(result.type, 'table_summary');
-    assert.equal(result.rows.length, 1);
-    assert.equal(result.rows[0].department, 'Finance');
-    assert.equal(result.rows[0].wantedBy instanceof Date, true);
-    assert.match(result.summary, /Finance has 1 visible legal request/i);
-  } finally {
-    LegalRequest.countDocuments = originalCount;
-    LegalRequest.find = originalFind;
+    Task.countDocuments = originalCount;
+    Task.find = originalFind;
   }
 });

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useNotifications } from '../../context/NotificationContext';
 import './Header.css';
 
-export default function Header({ title, subtitle }) {
+export default function Header({ title, subtitle, actions }) {
   const [searchQuery, setSearchQuery] = useState('');
   const navigate = useNavigate();
   const { unreadCount } = useNotifications();
@@ -47,12 +47,14 @@ export default function Header({ title, subtitle }) {
             )}
           </button>
 
-          <button
-            className="header__new-btn"
-            onClick={() => navigate('/contracts/new')}
-          >
-            + New Contract
-          </button>
+          {actions != null ? actions : (
+            <button
+              className="header__new-btn"
+              onClick={() => navigate('/contracts/new')}
+            >
+              + New Contract
+            </button>
+          )}
         </div>
       </div>
     </header>

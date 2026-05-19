@@ -3,7 +3,6 @@ const mongoose = require('mongoose');
 
 const quarterlyPlanItemSchema = new mongoose.Schema({
   quarterlyPlan: { type: mongoose.Schema.Types.ObjectId, ref: 'QuarterlyPlan', required: true },
-  legalRequest:  { type: mongoose.Schema.Types.ObjectId, ref: 'LegalRequest' },
 
   title:         { type: String, required: true, trim: true },
   description:   { type: String },
@@ -24,6 +23,5 @@ const quarterlyPlanItemSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 quarterlyPlanItemSchema.index({ quarterlyPlan: 1 });
-quarterlyPlanItemSchema.index({ legalRequest: 1 });
 
 module.exports = mongoose.model('QuarterlyPlanItem', quarterlyPlanItemSchema);

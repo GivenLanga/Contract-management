@@ -20,8 +20,8 @@ const CATEGORIES = {
 
 const DOMAIN_TERMS = {
   contracts: ['contract', 'contracts', 'agreement', 'agreements', 'counterparty', 'renewal', 'expiry', 'expired', 'expiring'],
-  legal_requests: ['legal request', 'legal requests', 'legal intake', 'intake', 'submitted', 'requested', 'came in'],
-  tasks: ['task', 'tasks', 'workload', 'overloaded'],
+  workflows: ['workflow', 'workflows', 'legal tracker', 'tracker task', 'tracker tasks', 'manual workflow'],
+  tasks: ['task', 'tasks', 'workload', 'overloaded', 'assigned work'],
   signing: ['sign', 'signed', 'signing', 'signature', 'signatures', 'signatory', 'signatories'],
   documents: ['document', 'documents', 'file', 'files', 'upload', 'uploaded'],
   reports: ['report', 'reports', 'dashboard', 'progress', 'analytics', 'summary', 'health', 'sla'],
@@ -107,7 +107,7 @@ class DomainIntentClassifier {
       return true;
     }
 
-    return /\b(how many|count|total|status|due|overdue|expired|expiring|active|signed|pending|submitted|requested|assigned|workload|progress|dashboard|report|value|waiting for manager|waiting for business|no update|needs my attention|need my attention|attention today|legal team|legal requests?|how is legal doing|how are legal doing|what changed recently|recent changes)\b/.test(text);
+    return /\b(how many|count|total|status|due|overdue|expired|expiring|active|signed|pending|assigned|workload|progress|dashboard|report|value|waiting for manager|waiting for business|no update|needs my attention|need my attention|attention today|legal team|workflow|tracker|task|tasks|how is legal doing|how are legal doing|what changed recently|recent changes)\b/.test(text);
   }
 
   _result(result) {

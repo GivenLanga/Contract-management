@@ -1,10 +1,8 @@
 const Contract = require('../../models/Contract');
-const LegalRequest = require('../../models/LegalRequest');
 const Document = require('../../models/Document');
 const {
   contractVisibilityFilter,
   documentVisibilityFilter,
-  legalRequestVisibilityFilter,
   mergeFilters,
   safeRegExp,
   safeWordsRegExp,
@@ -42,17 +40,10 @@ const addMonths = (date, months) => {
   return result;
 };
 
-// LegalRequest types that only exist in the LegalRequest model
-const LR_ONLY_TYPES = new Set([
-  'LOAN_AGREEMENT', 'GRANT_AGREEMENT', 'SERVICE_PROVIDER_AGREEMENT',
-  'LEASE_AGREEMENT', 'SOFTWARE_LICENSE', 'COMPLIANCE_DOCUMENT',
-  'PARTNERSHIP_MOU', 'COLLECTIONS_RECOVERY', 'INTERNAL_DOCUMENT', 'EXTERNAL_CONTRACT',
-]);
 // Contract types that only exist in the Contract model
 const CONTRACT_ONLY_TYPES = new Set([
   'MSA', 'SOW', 'License', 'MOA', 'MOI', 'SLA', 'Employment', 'Vendor', 'Lease', 'Other',
 ]);
-// 'NDA' exists in both models
 
 const renewalCandidatesFilter = (days) => {
   const today = startOfToday();
@@ -496,7 +487,7 @@ module.exports = [
 
   {
     name: 'get_contracts_by_type',
-    description: 'List contracts or legal requests of a specific type (e.g. LOAN_AGREEMENT, NDA, MSA, GRANT_AGREEMENT, SERVICE_PROVIDER_AGREEMENT).',
+    description: 'List contracts of a specific type or agreement family (e.g. LOAN_AGREEMENT, NDA, MSA, GRANT_AGREEMENT, SERVICE_PROVIDER_AGREEMENT).',
     riskLevel: 'low',
     requiredPermissions: ['contract:read'],
     schema: {
@@ -519,11 +510,14 @@ module.exports = [
     async execute(args, context) {
       const { contractType, limit = 10 } = args;
       const items = [];
-      const isLrType = LR_ONLY_TYPES.has(contractType);
       const isContractType = CONTRACT_ONLY_TYPES.has(contractType);
-      const isBoth = contractType === 'NDA';
+      const isKnownAgreementFamily = [
+        'LOAN_AGREEMENT', 'GRANT_AGREEMENT', 'SERVICE_PROVIDER_AGREEMENT',
+        'NDA', 'LEASE_AGREEMENT', 'SOFTWARE_LICENSE', 'COMPLIANCE_DOCUMENT',
+        'PARTNERSHIP_MOU', 'COLLECTIONS_RECOVERY', 'INTERNAL_DOCUMENT', 'EXTERNAL_CONTRACT',
+      ].includes(contractType);
 
-      if (isContractType || isBoth) {
+      if (isContractType || isKnownAgreementFamily) {
         const filter = mergeFilters({ type: contractType }, contractVisibilityFilter(context.user));
         const contracts = await Contract.find(filter).sort({ updatedAt: -1 }).limit(limit).lean();
         for (const c of contracts) {
@@ -532,18 +526,6 @@ module.exports = [
             source: 'contract', id: safe.contractId, title: safe.title,
             status: safe.status, expiryDate: safe.expiryDate,
             counterparty: safe.counterparty,
-          });
-        }
-      }
-
-      if (isLrType || isBoth) {
-        const lrType = isLrType ? contractType : 'NDA';
-        const filter = mergeFilters({ requestType: lrType }, legalRequestVisibilityFilter(context.user));
-        const requests = await LegalRequest.find(filter).sort({ updatedAt: -1 }).limit(limit).lean();
-        for (const lr of requests) {
-          items.push({
-            source: 'legal_request', id: lr.requestId, title: lr.title,
-            status: lr.status, counterparty: lr.counterpartyName,
           });
         }
       }
@@ -565,7 +547,7 @@ module.exports = [
 
   {
     name: 'get_contracts_by_counterparty',
-    description: 'Find contracts and legal requests involving a specific counterparty or company.',
+    description: 'Find contracts involving a specific counterparty or company.',
     riskLevel: 'low',
     requiredPermissions: ['contract:read'],
     schema: {
@@ -581,22 +563,13 @@ module.exports = [
       const { counterparty, limit = 10 } = args;
       const regex = safeRegExp(counterparty);
 
-      const [contracts, requests] = await Promise.all([
-        Contract.find(mergeFilters({ 'parties.name': regex }, contractVisibilityFilter(context.user)))
-          .sort({ updatedAt: -1 }).limit(limit).lean(),
-        LegalRequest.find(mergeFilters({ counterpartyName: regex }, legalRequestVisibilityFilter(context.user)))
-          .sort({ updatedAt: -1 }).limit(limit).lean(),
-      ]);
+      const contracts = await Contract.find(mergeFilters({ 'parties.name': regex }, contractVisibilityFilter(context.user)))
+        .sort({ updatedAt: -1 }).limit(limit).lean();
 
-      const items = [
-        ...contracts.map((c) => {
-          const safe = safeContractFields(c, context.user);
-          return { source: 'contract', id: safe.contractId, title: safe.title, status: safe.status, expiryDate: safe.expiryDate };
-        }),
-        ...requests.map((lr) => ({
-          source: 'legal_request', id: lr.requestId, title: lr.title, status: lr.status,
-        })),
-      ];
+      const items = contracts.map((c) => {
+        const safe = safeContractFields(c, context.user);
+        return { source: 'contract', id: safe.contractId, title: safe.title, status: safe.status, expiryDate: safe.expiryDate };
+      });
 
       const count = items.length;
       return {

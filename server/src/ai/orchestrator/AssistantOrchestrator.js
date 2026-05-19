@@ -82,8 +82,8 @@ class AssistantOrchestrator {
 
     // ── Phase: deterministic app-data planner ──
     // Live app facts must be answered by backend tools.  This planner runs before
-    // the legacy direct router so filtered app-data questions do not collapse into
-    // broad phrase matches such as "submitted legal requests".
+    // the legacy direct router so filtered app-data questions go through the
+    // structured workflows/tasks/signed-documents paths first.
     const _tPlan0 = Date.now();
     const appDataPlan = this._appDataPlanner.plan(message);
     const _planMs = Date.now() - _tPlan0;
@@ -483,7 +483,7 @@ class AssistantOrchestrator {
       title: 'Choose a System Lookup',
       category: 'app_data',
       summary: `I need to use a backend tool for ${domain} facts, but I could not select one confidently. Please ask for a specific count, list, status, value, due-date, signing, or progress lookup.`,
-      options: ['contracts', 'legal requests', 'tasks', 'signing', 'documents', 'reports'],
+      options: ['contracts', 'workflows', 'tasks', 'signing', 'documents', 'reports'],
     });
   }
 
@@ -708,7 +708,7 @@ class AssistantOrchestrator {
 
   _timeoutMessage(isOperational) {
     if (isOperational) {
-      return "I could not select the correct system tool before the local model timed out. No cloud fallback was used. Please try a more specific query like 'show submitted legal requests this week' or use the Legal Requests dashboard.";
+      return "I could not select the correct system tool before the local model timed out. No cloud fallback was used. Please try a more specific query like 'show unassigned workflow tasks' or use the Workflows page.";
     }
     return 'The local AI model took too long to respond. I did not use a cloud fallback. Please try again or use the dashboard filters.';
   }

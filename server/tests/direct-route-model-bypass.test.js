@@ -57,18 +57,18 @@ const chatArgs = (message) => ({
 });
 
 for (const [message, toolName] of [
-  ['What was requested in the legal Requests', 'query_legal_requests'],
-  ['What do i have in the legal requests', 'query_legal_requests'],
-  ['What task are in the legal requests', 'get_legal_request_tasks'],
-  ['Who is overloaded on the team?', 'get_workload_by_user'],
-  ['What needs my attention today?', 'get_manager_attention_summary'],
-  ['What is due today?', 'get_due_today'],
+  ['Show unassigned workflow tasks', 'query_tasks'],
+  ['What tracker tasks are overdue?', 'query_tasks'],
+  ['Show manual workflow tasks', 'query_tasks'],
+  ['Who is overloaded on the team?', 'get_task_summary'],
+  ['What needs my attention today?', 'query_tasks'],
+  ['What is due today?', 'query_tasks'],
   ['How many documents have expired?', 'query_documents'],
-  ["What's the legal team's progress this month?", 'get_legal_team_progress'],
+  ["What's the legal team's progress this month?", 'query_reports_summary'],
   ['How many agreements are active?', 'query_contracts'],
   ["What's the total value of the all the contracts?", 'query_contract_value'],
-  ['Whats urgent in the legal requests', 'query_legal_requests'],
-  ['In the legal requests, what did finance ask for and when do they want it', 'query_legal_requests'],
+  ['List my tasks', 'query_tasks'],
+  ['Show signature follow-ups', 'query_tasks'],
 ]) {
   test(`direct route bypasses model for "${message}"`, async () => {
     const { orch, getGenerateCalls } = makeOrchestrator();

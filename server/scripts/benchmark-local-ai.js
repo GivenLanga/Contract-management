@@ -385,7 +385,7 @@ function buildTestCases(builder, mockUser, promptAnalysis) {
     {
       name: 'full system prompt, no RAG, operational query',
       systemPrompt: baseSystemPrompt,
-      messages: [{ role: 'user', content: 'What legal requests were submitted this week?' }],
+      messages: [{ role: 'user', content: 'Show unassigned workflow tasks.' }],
       maxTokens: 100,
       promptChars: baseSystemPrompt.length + 45,
       promptTokensEst: promptAnalysis.basePromptTokens + 12,

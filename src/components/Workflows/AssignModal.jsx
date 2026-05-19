@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react';
-import { auth as authApi, tasks as tasksApi } from '../../services/api';
+import { auth as authApi } from '../../services/api';
+import { upsertTrackerTask, updateManualTaskAssignee } from '../../services/trackerTaskBridge';
 
 export default function AssignModal({ task, onClose, onAssigned }) {
-  const [users, setUsers]           = useState([]);
+  const [users, setUsers]               = useState([]);
   const [selectedUser, setSelectedUser] = useState('');
-  const [note, setNote]             = useState('');
+  const [note, setNote]                 = useState('');
   const [updateSpreadsheet, setUpdateSpreadsheet] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError]           = useState('');
+  const [submitting, setSubmitting]     = useState(false);
+  const [error, setError]               = useState('');
 
   useEffect(() => {
     authApi.users()
@@ -15,7 +16,8 @@ export default function AssignModal({ task, onClose, onAssigned }) {
       .catch(() => {});
   }, []);
 
-  const isTracker = task?.sourceType === 'LEGAL_TRACKER';
+  const isTracker = task?.sourceType === 'LEGAL_TRACKER' || task?._type === 'TRACKER';
+  const isManual  = task?.sourceType === 'MANUAL_WORKFLOW' || task?._type === 'MANUAL';
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -26,7 +28,7 @@ export default function AssignModal({ task, onClose, onAssigned }) {
     const assignedUser = users.find(u => u._id === selectedUser);
     const results = { appUpdated: false, spreadsheetUpdated: false, taskCreated: false };
 
-    // 1. Update spreadsheet assignee column
+    // 1. Update spreadsheet assignee column (tracker tasks only)
     if (isTracker && updateSpreadsheet && window.contractiq?.trackerUpdateRow) {
       try {
         const res = await window.contractiq.trackerUpdateRow({
@@ -40,20 +42,32 @@ export default function AssignModal({ task, onClose, onAssigned }) {
       }
     }
 
-    // 2. Create backend task for the assignee
-    try {
-      await tasksApi.create({
-        title:       `[Tracker] ${task.description || task.taskType || 'Legal Tracker Task'}`,
-        description: note || `Assigned from Legal Tracker row ${task.rowNumber}`,
-        type:        'GENERAL_TASK',
-        assignedTo:  selectedUser,
-        deadline:    task.deadline ? new Date(task.deadline).toISOString() : undefined,
-        priority:    task.priority || 'Medium',
-        status:      'Pending',
+    // 2. Create or update linked backend task (upsert — no duplicates on re-assign)
+    if (isTracker) {
+      const bridgeResult = await upsertTrackerTask({
+        trackerTask:    task,
+        assignedUserId: selectedUser,
+        note,
       });
-      results.taskCreated = true;
-    } catch (err) {
-      console.warn('[AssignModal] task creation failed', err);
+      if (bridgeResult.ok) {
+        results.taskCreated = bridgeResult.created;
+        results.taskUpdated = !bridgeResult.created;
+      } else {
+        console.warn('[AssignModal] tracker upsert failed', bridgeResult.message);
+      }
+    }
+
+    // 3. For manual workflow tasks, update the linked backend task assignee
+    if (isManual) {
+      const manualResult = await updateManualTaskAssignee({
+        task,
+        assignedUserId: selectedUser,
+      });
+      if (manualResult.ok) {
+        results.taskUpdated = true;
+      } else {
+        console.warn('[AssignModal] manual task update failed', manualResult.code, manualResult.message);
+      }
     }
 
     results.appUpdated = true;
@@ -72,21 +86,35 @@ export default function AssignModal({ task, onClose, onAssigned }) {
         <div className="modal-body">
           {/* Task summary */}
           <div className="asgn__summary">
-            <span className="asgn__source-badge asgn__source-badge--tracker">
-              {isTracker ? 'Legal Tracker' : 'Manual'}
+            <span className={`asgn__source-badge ${isTracker ? 'asgn__source-badge--tracker' : 'asgn__source-badge--manual'}`}>
+              {isTracker ? 'Legal Tracker' : 'Manual Workflow'}
             </span>
+            {task?.taskType && (
+              <span className="asgn__type-badge">{task.taskType}</span>
+            )}
             <p className="asgn__task-title">
               {task?.description || task?.taskType || task?.title || 'Tracker Task'}
             </p>
-            {task?.parties && <p className="asgn__task-meta">Parties: {task.parties}</p>}
-            {task?.deadline && (
+            {task?.parties && <p className="asgn__task-meta"><strong>Parties:</strong> {task.parties}</p>}
+            {task?.purpose && <p className="asgn__task-meta"><strong>Purpose:</strong> {task.purpose}</p>}
+            {task?.department && <p className="asgn__task-meta"><strong>Department:</strong> {task.department}</p>}
+            {(task?.deadline || task?.dueDate) && (
               <p className="asgn__task-meta">
-                Deadline: {new Date(task.deadline).toLocaleDateString('en-ZA')}
+                <strong>Deadline:</strong>{' '}
+                {task.rawDeadlineText || (() => {
+                  const d = new Date(task.deadline || task.dueDate);
+                  return isNaN(d) ? '—' : d.toLocaleDateString('en-ZA');
+                })()}
               </p>
             )}
             {(task?.assignee || task?.assignedTo) && (
               <p className="asgn__task-meta">
-                Current assignee: <strong>{task.assignee || task.assignedTo?.name || '—'}</strong>
+                <strong>Current assignee:</strong> {task.assignee || task.assignedTo?.name || '—'}
+              </p>
+            )}
+            {task?.keyLearning && (
+              <p className="asgn__task-meta asgn__task-meta--note">
+                <strong>Notes:</strong> {task.keyLearning}
               </p>
             )}
           </div>

@@ -421,7 +421,6 @@ router.post('/:id/draft', protect, async (req, res) => {
       department,
       category,
       effectiveDate,
-      legalRequestId,
       placeholderValues,
       notes,
     } = req.body;
@@ -466,7 +465,6 @@ router.post('/:id/draft', protect, async (req, res) => {
       status: 'Draft',
       documentStage: 'DRAFT',
       description: notes?.trim() || `Draft created from template: ${template.title || template.name}`,
-      legalRequest: legalRequestId || undefined,
       tags: [
         department ? `dept:${sanitizeFilename(department)}` : null,
         counterparty ? `counterparty:${sanitizeFilename(counterparty)}` : null,

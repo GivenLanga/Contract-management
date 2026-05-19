@@ -121,45 +121,13 @@ const safeTaskFields = (record, user) => {
     type: t.type,
     assignedTo: t.assignedTo && typeof t.assignedTo === 'object' ? safeUserFields(t.assignedTo, user) : t.assignedTo,
     assignedBy: t.assignedBy && typeof t.assignedBy === 'object' ? safeUserFields(t.assignedBy, user) : t.assignedBy,
-    contract: t.contract && typeof t.contract === 'object'
-      ? { _id: idText(t.contract), title: t.contract.title, contractId: t.contract.contractId }
-      : t.contract,
-    legalRequest: t.legalRequest,
-  };
-};
-
-const safeLegalRequestFields = (record, user) => {
-  const lr = normalizeRecord(record) || {};
-  return {
-    id: lr.requestId || lr.id,
-    _id: idText(lr),
-    title: lr.title,
-    status: lr.status,
-    requestType: lr.requestType,
-    internalOrExternal: lr.internalOrExternal,
-    currentHolder: lr.currentHolder,
-    assignedTo: lr.assignedTo && typeof lr.assignedTo === 'object' ? safeUserFields(lr.assignedTo, user) : lr.assignedTo,
-    department: lr.department,
-    dueDate: lr.dueDate,
-    targetDate: lr.targetDate,
-    priority: lr.priority,
-    nextAction: lr.nextAction,
-    contractValue: lr.contractValue,
-    currency: lr.currency,
-    counterpartyName: lr.counterpartyName,
-    submittedAt: lr.submittedAt,
-    completedAt: lr.completedAt,
-    lastStatusChangeAt: lr.lastStatusChangeAt,
-    signatureRequestedAt: lr.signatureRequestedAt,
-    signatureEmailSentAt: lr.signatureEmailSentAt,
-    fullySignedAt: lr.fullySignedAt,
-    pendingSignatoriesCount: lr.pendingSignatoriesCount,
-    completedSignatoriesCount: lr.completedSignatoriesCount,
-    isFullySigned: lr.isFullySigned,
-    legalWorkingDays: lr.legalWorkingDays,
-    totalElapsedDays: lr.totalElapsedDays,
-  };
-};
+	    contract: t.contract && typeof t.contract === 'object'
+	      ? { _id: idText(t.contract), title: t.contract.title, contractId: t.contract.contractId }
+	      : t.contract,
+	    sourceType: t.sourceType,
+	    trackerMeta: t.trackerMeta,
+	  };
+	};
 
 const safeSignatureFields = (record, user) => {
   const s = normalizeRecord(record) || {};
@@ -196,30 +164,12 @@ const safeAuditFields = (record, user) => {
   };
 };
 
-const safeWorkflowHistoryEvent = (record, user) => {
-  const h = normalizeRecord(record) || {};
-  return {
-    timestamp: h.changedAt,
-    changedBy: h.changedBy && typeof h.changedBy === 'object'
-      ? (h.changedBy.name || h.changedBy.email || 'System')
-      : 'System',
-    actionType: h.actionType || 'STATUS_CHANGE',
-    oldStatus: h.oldStatus || null,
-    newStatus: h.newStatus,
-    oldHolder: h.oldHolder || null,
-    newHolder: h.newHolder || null,
-    ...(isAdminOrManager(user) && h.comment ? { comment: redactSensitiveText(h.comment, { maxChars: 500 }) } : {}),
-  };
-};
-
 module.exports = {
   redactSensitiveFields,
   safeAuditFields,
   safeContractFields,
   safeDocumentFields,
-  safeLegalRequestFields,
   safeSignatureFields,
   safeTaskFields,
   safeUserFields,
-  safeWorkflowHistoryEvent,
 };

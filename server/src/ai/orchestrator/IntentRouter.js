@@ -12,7 +12,6 @@ const PAGE_ALIASES = [
   { page: 'settings',      terms: ['settings', 'preferences', 'configuration'] },
   { page: 'users',           terms: ['users', 'user management', 'team members', 'user list'] },
   { page: 'profile',         terms: ['profile', 'my profile', 'account'] },
-  { page: 'legal requests',  terms: ['legal requests', 'legal request list', 'request list', 'legal matters', 'intake'] },
 ];
 
 const NAVIGATION_VERB = /\b(navigate|go|take me|send me|open|view|show|switch|bring me)\b/i;
@@ -61,7 +60,7 @@ class IntentRouter {
     if (/^\s*(who are you|what are you|introduce yourself)\??\s*$/i.test(raw)) {
       return {
         type: 'message',
-        content: 'I am your AI legal assistant for this contract management app. I can search contracts, check legal request status, SLA compliance, tasks, signing status, navigate workflows, and answer questions using your Legal Folder when it is indexed.',
+        content: 'I am your AI legal assistant for this contract management app. I can search contracts, check workflow tasks, signing status, reports, and answer questions using your Legal Folder when it is indexed.',
       };
     }
 
@@ -388,16 +387,6 @@ class IntentRouter {
     if (!SIGNING_RE.test(text)) return null;
     if (BACKEND_TECH_RE.test(text)) return null;
 
-    // "which contracts are awaiting/pending signature" is a workflow/contract question,
-    // not a document signing platform question — let it fall through to workflow routing
-    if (
-      hasAny(text, 'contract', 'contracts', 'agreement', 'agreements') &&
-      hasAny(text, 'awaiting signature', 'pending signature') &&
-      !hasAny(text, 'document', 'documents', 'pdf', 'file', 'platform', 'queue')
-    ) {
-      return null;
-    }
-
     const countOnly = /\b(how many|count|number of|total)\b/.test(text);
     const listArgs = { limit: 10 };
     const choose = (countTool, listTool) => ({
@@ -448,228 +437,71 @@ class IntentRouter {
   }
 
   _routeWorkflowIntent(text, raw) {
-    // ── Manager attention / "what needs my attention" ─────────────────────────
-    if (
-      hasAny(text, 'needs my attention', 'need my attention', 'attention today', 'whats next for me') ||
-      hasAll(text, 'what', 'should', 'follow up') ||
-      hasAll(text, 'manager', 'attention') ||
-      (hasAny(text, 'prioritize', 'prioritise', 'what to work on', 'focus on') && hasAny(text, 'legal', 'request', 'manager'))
-    ) {
-      return { type: 'tool_call', toolName: 'get_manager_attention_summary', arguments: {} };
+    const taskFilters = {};
+    if (hasAny(text, 'legal tracker', 'tracker task', 'tracker tasks', 'tracker row', 'tracker rows')) {
+      taskFilters.sourceType = 'LEGAL_TRACKER';
+    }
+    if (hasAny(text, 'manual workflow', 'manual task', 'manual tasks')) {
+      taskFilters.sourceType = 'MANUAL_WORKFLOW';
+    }
+    if (hasAny(text, 'due today', 'attention today', 'needs my attention', 'need my attention', 'whats next for me')) {
+      taskFilters.dueRange = 'today';
+    } else if (hasAny(text, 'due this week', 'due next week', 'due this month') || hasAll(text, 'due', 'week')) {
+      taskFilters.dueRange = 'this_week';
+    }
+    if (hasAny(text, 'unassigned', 'not assigned', 'no owner', 'nobody assigned', 'has no owner', 'without owner')) {
+      taskFilters.unassignedOnly = true;
+    }
+    if (hasAny(text, 'overdue', 'past due', 'late')) {
+      if (Object.keys(taskFilters).length) {
+        return { type: 'tool_call', toolName: 'query_tasks', arguments: { filters: { ...taskFilters, overdueOnly: true }, limit: 20 } };
+      }
+      if (!hasAny(text, 'contract', 'contracts', 'document', 'documents')) {
+        return { type: 'tool_call', toolName: 'list_overdue_tasks', arguments: { mine_only: hasAny(text, 'my', 'mine', 'me'), limit: 10 } };
+      }
     }
 
-    // ── SLA: internal ─────────────────────────────────────────────────────────
-    if (
-      hasAny(text, 'internal sla', 'internal turnaround', 'internal compliance', 'internal service level') ||
-      (hasAny(text, 'sla', 'service level', 'turnaround') && hasAny(text, 'internal', '4 day', 'four day'))
-    ) {
-      return { type: 'tool_call', toolName: 'get_internal_sla_summary', arguments: {} };
+    if (Object.keys(taskFilters).length) {
+      return { type: 'tool_call', toolName: 'query_tasks', arguments: { filters: taskFilters, limit: 20 } };
     }
 
-    // ── SLA: external ─────────────────────────────────────────────────────────
     if (
-      hasAny(text, 'external sla', 'external turnaround', 'external compliance', 'external service level') ||
-      (hasAny(text, 'sla', 'service level', 'turnaround') && hasAny(text, 'external', '7 day', 'seven day'))
+      hasAny(text, 'what should i follow up', 'what should follow up', 'what to work on', 'focus on') ||
+      hasAll(text, 'manager', 'attention')
     ) {
-      return { type: 'tool_call', toolName: 'get_external_sla_summary', arguments: {} };
+      return { type: 'tool_call', toolName: 'query_tasks', arguments: { filters: { dueRange: 'today' }, limit: 20 } };
     }
 
-    // ── SLA: generic / missed SLA ─────────────────────────────────────────────
-    if (
-      hasAny(text, 'sla summary', 'sla report', 'missed sla', 'missed the sla', 'sla compliance',
-        'met sla', 'meet sla', 'hit sla', 'within sla') ||
-      (hasAny(text, 'sla') && hasAny(text, 'summary', 'report', 'compliance', 'month', 'quarter', 'this', 'today', 'week'))
-    ) {
-      // Default to internal unless external is mentioned
-      return hasAny(text, 'external')
-        ? { type: 'tool_call', toolName: 'get_external_sla_summary', arguments: {} }
-        : { type: 'tool_call', toolName: 'get_internal_sla_summary', arguments: {} };
-    }
-
-    // ── Due today (legal requests, not tasks) ────────────────────────────────
-    if (
-      hasAny(text, 'due today') &&
-      !hasAny(text, 'task', 'tasks')
-    ) {
-      return { type: 'tool_call', toolName: 'get_due_today', arguments: {} };
-    }
-
-    // ── Due this week (legal requests) ───────────────────────────────────────
-    if (
-      (hasAny(text, 'due this week', 'due next week', 'due this month') ||
-       (hasAll(text, 'due', 'week') && !hasAny(text, 'task', 'tasks'))) &&
-      !hasAny(text, 'task', 'tasks')
-    ) {
-      return { type: 'tool_call', toolName: 'get_due_this_week', arguments: {} };
-    }
-
-    // ── Overdue legal requests (not tasks) ───────────────────────────────────
-    if (
-      hasAny(text, 'overdue') &&
-      !hasAny(text, 'task', 'tasks') &&
-      (hasAny(text, 'request', 'requests', 'matter', 'matters', 'legal', 'item', 'items', 'what') ||
-       !hasAny(text, 'contract', 'document', 'doc'))
-    ) {
-      return { type: 'tool_call', toolName: 'get_overdue_requests', arguments: {} };
-    }
-
-    // ── Unassigned ───────────────────────────────────────────────────────────
-    if (
-      hasAny(text, 'unassigned', 'not assigned', 'no owner', 'nobody assigned', 'has no owner', 'without owner') &&
-      !hasAny(text, 'task', 'tasks', 'contract', 'document')
-    ) {
-      return { type: 'tool_call', toolName: 'get_unassigned_requests', arguments: {} };
-    }
-
-    // ── Waiting for manager ──────────────────────────────────────────────────
     if (
       hasAny(text, 'waiting for manager', 'with manager', 'manager review', 'manager action',
         'pending manager', 'manager approval', 'waiting on manager', 'in manager review',
-        'needs manager', 'requires manager')
+        'waiting for business', 'with business', 'business input', 'business review',
+        'no update', 'no activity', 'no progress', 'stale', 'no movement', 'stuck', 'blocking', 'blocked', 'bottleneck')
     ) {
-      return { type: 'tool_call', toolName: 'get_waiting_for_manager', arguments: {} };
+      return { type: 'tool_call', toolName: 'query_reports_summary', arguments: { reportType: 'tasks', period: 'this_month' } };
     }
 
-    // ── Waiting for business ─────────────────────────────────────────────────
-    if (
-      hasAny(text, 'waiting for business', 'with business', 'business input', 'business department',
-        'waiting on business', 'business review', 'business feedback', 'pending business')
-    ) {
-      return { type: 'tool_call', toolName: 'get_waiting_for_business', arguments: {} };
+    if (hasAny(text, 'ready for signature', 'ready to be signed', 'final documents ready for signing')) {
+      return { type: 'tool_call', toolName: 'list_pending_signatures', arguments: { limit: 10 } };
     }
 
-    // ── Submitted / newly filed legal requests ────────────────────────────────
-    const submittedIntent = this._routeSubmittedLegalRequestsIntent(text);
-    if (submittedIntent) return submittedIntent;
-
-    // ── Ready for signature (legal requests) ─────────────────────────────────
-    if (
-      hasAny(text, 'ready for signature', 'ready to be signed') &&
-      hasAny(text, 'request', 'requests', 'matter', 'matters', 'approved', 'legal')
-    ) {
-      return { type: 'tool_call', toolName: 'get_ready_for_signature', arguments: {} };
+    if (hasAny(text, 'signature email', 'signature emails', 'signing email', 'signing emails', 'sent for signature', 'sent to sign')) {
+      return { type: 'tool_call', toolName: 'query_signing', arguments: { filters: { sentForSignature: true }, limit: 20 } };
     }
 
-    // ── Signature emails sent ────────────────────────────────────────────────
-    if (
-      hasAny(text, 'signature email', 'signature emails', 'signing email', 'signing emails') ||
-      (hasAny(text, 'sent for signature', 'sent to sign') &&
-       hasAny(text, 'request', 'email', 'legal', 'how many', 'which'))
-    ) {
-      return { type: 'tool_call', toolName: 'get_signature_email_sent', arguments: {} };
-    }
-
-    // ── Awaiting signature (legal requests and contracts context) ────────────
-    // Exclude document/pdf queries — those belong to the signing platform (list_pending_signatures).
-    if (
-      hasAny(text, 'awaiting signature', 'still needs to sign', 'still need to sign',
-        'still waiting for signature', 'hasnt signed', 'haven t signed', 'have not signed') &&
-      hasAny(text, 'request', 'requests', 'matter', 'matters', 'legal',
-        'contract', 'contracts', 'agreement', 'agreements') &&
-      !hasAny(text, 'document', 'documents')
-    ) {
-      return { type: 'tool_call', toolName: 'get_awaiting_signature', arguments: {} };
-    }
-
-    // ── No update / stuck / stale ────────────────────────────────────────────
-    if (
-      hasAny(text, 'no update', 'no activity', 'no progress', 'stale', 'no movement') ||
-      (hasAny(text, 'stuck', 'blocking', 'blocked', 'bottleneck') && !hasAny(text, 'task', 'tasks'))
-    ) {
-      return { type: 'tool_call', toolName: 'get_no_update_requests', arguments: {} };
-    }
-
-    // ── Workload ─────────────────────────────────────────────────────────────
     if (
       hasAny(text, 'team workload', 'workload summary', 'whos handling most', 'who handles most',
-        'workload by user', 'workload per person', 'most legal work', 'most legal requests') ||
-      (hasAny(text, 'workload', 'overloaded') && !hasAny(text, 'task', 'tasks')) ||
-      (hasAny(text, 'who') && hasAny(text, 'overloaded', 'too many', 'most work', 'most requests', 'most cases', 'most legal work'))
+        'workload by user', 'workload per person', 'most legal work') ||
+      (hasAny(text, 'workload', 'overloaded') && !hasAny(text, 'contract', 'contracts', 'document', 'documents'))
     ) {
-      return { type: 'tool_call', toolName: 'get_workload_by_user', arguments: {} };
+      return { type: 'tool_call', toolName: 'get_task_summary', arguments: { mine_only: false } };
     }
 
-    // ── Workflow history / timeline (only if a request ID is present) ────────
-    if (
-      hasAny(text, 'workflow history', 'status history', 'audit trail', 'timeline', 'what happened to',
-        'history of', 'progress of') &&
-      hasAny(text, 'request', 'matter', 'lr-')
-    ) {
-      const requestIdMatch = (raw || '').match(/\bLR-\d{4}-\d{5}\b/i);
-      if (requestIdMatch) {
-        return {
-          type: 'tool_call',
-          toolName: 'get_workflow_history',
-          arguments: { legalRequestId: requestIdMatch[0].toUpperCase() },
-        };
-      }
-      // No ID in the query — let the model handle it (it can ask for the ID)
+    if (hasAny(text, 'workflow progress', 'legal team progress', 'how is legal doing', 'how are legal doing')) {
+      return { type: 'tool_call', toolName: 'query_reports_summary', arguments: { reportType: 'tasks', period: 'this_month' } };
     }
 
     return null;
-  }
-
-  _routeSubmittedLegalRequestsIntent(text) {
-    // "in submitted status" — period-independent status filter
-    if (
-      hasAny(text, 'submitted status', 'in submitted') &&
-      hasAny(text, 'legal request', 'legal requests', 'legal')
-    ) {
-      return {
-        type: 'tool_call',
-        toolName: 'get_submitted_legal_requests',
-        arguments: { period: 'all', status: 'SUBMITTED' },
-      };
-    }
-
-    const hasLegalContext = hasAny(
-      text,
-      'legal request', 'legal requests', 'legal submission', 'legal submissions',
-    );
-
-    const isSubmitQuery =
-      // "submitted" + legal request context
-      (hasAny(text, 'submitted') && hasLegalContext) ||
-      // "requested" + legal request context
-      (hasAny(text, 'requested') && hasLegalContext) ||
-      // "what was requested in legal requests"
-      (hasAny(text, 'what was requested', 'what got requested') && hasAny(text, 'legal request', 'legal requests', 'legal intake', 'intake')) ||
-      // "show requested legal requests/items"
-      (hasAny(text, 'requested legal request', 'requested legal requests', 'requested items', 'requested item') && hasAny(text, 'show', 'list', 'what', 'which', 'legal')) ||
-      // "submitted to legal" / "submit to legal" (e.g. "What was submitted to legal?")
-      (hasAny(text, 'submitted to legal', 'submit to legal') && hasAny(text, 'legal')) ||
-      // "requested from legal" / "departments request from legal"
-      (hasAny(text, 'requested from legal', 'request from legal', 'departments request', 'people request from legal', 'did departments request', 'did people request') && hasAny(text, 'legal')) ||
-      // "departments submit to legal"
-      (hasAny(text, 'departments submit') && hasAny(text, 'legal')) ||
-      // "new legal requests"
-      hasAny(text, 'new legal request', 'new legal requests') ||
-      // "recent legal requests" / "legal intake"
-      (hasAny(text, 'recent') && hasAny(text, 'legal request', 'legal requests', 'legal intake', 'intake')) ||
-      hasAny(text, 'show legal intake', 'legal intake') ||
-      // "recent legal submissions"
-      (hasAny(text, 'recent') && hasAny(text, 'legal submission', 'legal submissions')) ||
-      // "came in" + legal requests (e.g. "What legal requests came in today?")
-      (hasAny(text, 'came in') && (hasLegalContext || hasAny(text, 'to legal')));
-
-    if (!isSubmitQuery) return null;
-
-    const period = hasAny(text, 'today') ? 'today'
-      : hasAny(text, 'this month') ? 'this_month'
-      : 'this_week';
-
-    return {
-      type: 'tool_call',
-      toolName: 'get_submitted_legal_requests',
-      arguments: {
-        period,
-        ...(
-          hasAny(text, 'requested', 'what was requested', 'request from legal', 'requested from legal', 'legal intake', 'came in', 'recent')
-            ? { status: 'ALL' }
-            : {}
-        ),
-      },
-    };
   }
 
   _pageFromNavigation(text) {

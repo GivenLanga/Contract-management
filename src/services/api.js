@@ -116,12 +116,14 @@ export const contracts = {
 };
 
 export const tasks = {
-  list:   (params = {}) => request(`/tasks?${new URLSearchParams(params)}`),
-  get:    (id) => request(`/tasks/${id}`),
-  stats:  () => request('/tasks/stats'),
-  create: (data) => request('/tasks', { method: 'POST', body: JSON.stringify(data) }),
-  update: (id, data) => request(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  delete: (id) => request(`/tasks/${id}`, { method: 'DELETE' }),
+  list:             (params = {}) => request(`/tasks?${new URLSearchParams(params)}`),
+  get:              (id) => request(`/tasks/${id}`),
+  stats:            () => request('/tasks/stats'),
+  create:           (data) => request('/tasks', { method: 'POST', body: JSON.stringify(data) }),
+  update:           (id, data) => request(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  delete:           (id) => request(`/tasks/${id}`, { method: 'DELETE' }),
+  findByTrackerKey: (trackerRowKey) => request(`/tasks?${new URLSearchParams({ trackerRowKey, limit: 1 })}`),
+  findBySourceType: (sourceType, extra = {}) => request(`/tasks?${new URLSearchParams({ sourceType, ...extra })}`),
 };
 
 export const documents = {
@@ -243,21 +245,6 @@ export const reports = {
   audit: (params = {}) => request(`/reports/audit?${new URLSearchParams(params)}`),
   kpis: () => request('/reports/kpis'),
   summary: (params = {}) => request(`/reports/summary?${new URLSearchParams(params)}`),
-};
-
-export const legalRequests = {
-  list:              (params = {}) => request(`/legal-requests?${new URLSearchParams(params)}`),
-  get:               (id) => request(`/legal-requests/${id}`),
-  create:            (data) => request('/legal-requests', { method: 'POST', body: JSON.stringify(data) }),
-  update:            (id, data) => request(`/legal-requests/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  updateStatus:      (id, status, comment) => request(`/legal-requests/${id}/status`, { method: 'PUT', body: JSON.stringify({ status, comment }) }),
-  assign:            (id, assignedTo) => request(`/legal-requests/${id}/assign`, { method: 'PUT', body: JSON.stringify({ assignedTo }) }),
-  overrideDueDate:   (id, dueDate, reason) => request(`/legal-requests/${id}/override-due-date`, { method: 'PUT', body: JSON.stringify({ dueDate, reason }) }),
-  managerDashboard:  () => request('/legal-requests/dashboard/manager'),
-  memberDashboard:   () => request('/legal-requests/dashboard/member'),
-  workflowDashboard: () => request('/legal-requests/workflow-dashboard'),
-  transitions:       (status) => request(`/legal-requests/transitions/${encodeURIComponent(status)}`),
-  delete:            (id) => request(`/legal-requests/${id}`, { method: 'DELETE' }),
 };
 
 export const fileUrl = (filename) => `/${filename}`;

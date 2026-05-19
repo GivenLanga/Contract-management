@@ -43,7 +43,7 @@ NODE_ENV=development npm install
 NODE_ENV=development npm run dev
 ```
 
-Frontend runs at: **http://localhost:5173**
+Frontend runs at: **http://localhost:5174**
 
 ---
 
