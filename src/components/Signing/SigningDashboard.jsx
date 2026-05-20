@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { getSigningDocuments, subscribeToSigning } from '../../services/signingStore';
+import { selectSentWaitingSigningDocuments } from '../../services/signingDocumentSelectors';
 import { documents, signing as signingApi } from '../../services/api';
 import './SigningDashboard.css';
 
@@ -16,6 +17,10 @@ const STATUS_BADGE = {
 
 const isReadyForEnvelope = (doc) => doc?.status === 'Ready for Signature';
 const envelopeRoute = (docId, mode) => `/signing/envelope/${docId}?mode=${mode}`;
+const SIGNING_DASHBOARD_RETURN_STATE = {
+  returnTo: '/signing',
+  returnLabel: 'Signing',
+};
 
 const SIGNER_STATUS_META = {
   signed:     { cls: 'sd-signer-chip--signed',   icon: '✅', label: 'Signed' },
@@ -74,11 +79,7 @@ export default function SigningDashboard() {
     d.signingFields?.some((f) => (f.assignedTo === user?.email || !f.assignedTo) && !f.filled) ||
     !d.signingFields?.length
   );
-  const waitingOnOthers = pending.filter((d) =>
-    isManager ||
-    (user?._id && d.uploadedBy?._id === user._id) ||
-    (user?.email && d.uploadedBy?.email === user.email)
-  );
+  const waitingOnOthers = selectSentWaitingSigningDocuments(docs, { user, isManager });
 
   const tabs = [
     { key: 'ready',     label: 'Ready to Send',      count: ready.length,           icon: '📤' },
@@ -119,7 +120,7 @@ export default function SigningDashboard() {
     const prepareRoute = envelopeRoute(doc._id, 'prepare');
 
     return (
-      <div className="sd-card" onClick={() => navigate(openRoute)}>
+      <div className="sd-card" onClick={() => navigate(openRoute, { state: SIGNING_DASHBOARD_RETURN_STATE })}>
         <div className="sd-card-top">
           <div className="sd-card-icon">📄</div>
           <div className="sd-card-info">
@@ -190,7 +191,7 @@ export default function SigningDashboard() {
         <div className="sd-card-actions" onClick={(e) => e.stopPropagation()}>
           <button
             className="sd-btn sd-btn--view"
-            onClick={() => navigate(openRoute)}
+            onClick={() => navigate(openRoute, { state: SIGNING_DASHBOARD_RETURN_STATE })}
           >
             View Document
           </button>
@@ -205,7 +206,7 @@ export default function SigningDashboard() {
           {showSignBtn && doc.status !== 'Signed' && (
             <button
               className="sd-btn sd-btn--sign"
-              onClick={() => navigate(signRoute)}
+              onClick={() => navigate(signRoute, { state: SIGNING_DASHBOARD_RETURN_STATE })}
             >
               ✍️ Sign Now
             </button>
@@ -213,7 +214,7 @@ export default function SigningDashboard() {
           {isManager && (
             <button
               className="sd-btn sd-btn--audit"
-              onClick={() => navigate(`/signing/view/${doc._id}?panel=activity`)}
+              onClick={() => navigate(`/signing/view/${doc._id}?panel=activity`, { state: SIGNING_DASHBOARD_RETURN_STATE })}
             >
               Audit Trail
             </button>

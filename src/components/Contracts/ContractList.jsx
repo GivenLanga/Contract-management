@@ -4,6 +4,7 @@ import Header from '../Layout/Header';
 import Badge from '../common/Badge';
 import { getContractsForApp, LEGAL_FOLDER_UPDATED } from '../../services/legalFolderStore';
 import { classifyLifecycleStage } from '../../services/legalFolderLifecycleClassifier';
+import { daysUntilExpiry as daysUntil, normalizePortfolioContract } from '../../services/contractPortfolioSelectors';
 import './ContractList.css';
 
 const STATUS_OPTIONS = ['All', 'Active', 'Expired', 'Expiring Soon', 'Terminated', 'Unknown'];
@@ -21,11 +22,6 @@ const fmt = (v, displayValue = null) =>
     ? '—'
     : new Intl.NumberFormat('en-ZA', { style: 'currency', currency: 'ZAR', maximumFractionDigits: 0 }).format(v));
 
-const daysUntil = (dateStr) => {
-  if (!dateStr) return null;
-  return Math.round((new Date(dateStr) - new Date()) / 86400000);
-};
-
 const timeAgo = (d) => {
   const diff = Math.round((new Date() - new Date(d)) / 86400000);
   if (diff < 1) return 'today';
@@ -37,57 +33,6 @@ const timeAgo = (d) => {
   if (diff < 365) return `${Math.floor(diff / 30)} months ago`;
   if (diff < 730) return '1 year ago';
   return `${Math.floor(diff / 365)} years ago`;
-};
-
-const CONTRACT_STATUS_LABELS = {
-  ACTIVE: 'Active',
-  EXPIRED: 'Expired',
-  EXPIRING_SOON: 'Expiring Soon',
-  TERMINATED: 'Terminated',
-  UNKNOWN: 'Unknown',
-};
-
-const contractStatusLabel = (value) =>
-  CONTRACT_STATUS_LABELS[String(value || '').toUpperCase()] || null;
-
-const portfolioStatusForContract = (contract) => {
-  if (contract?.contractStatusLabel && contract.contractStatusLabel !== 'Signed') return contract.contractStatusLabel;
-  const fromCode = contractStatusLabel(contract?.contractStatus);
-  if (fromCode) return fromCode;
-  if (contract?.terminationDate) return 'Terminated';
-  const endDate = contract?.expiryDate || contract?.expirationDate || contract?.endDate;
-  if (!endDate) return 'Unknown';
-  const today = new Date();
-  const todayMidnight = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
-  const end = new Date(`${String(endDate).slice(0, 10)}T00:00:00Z`);
-  if (Number.isNaN(end.getTime())) return 'Unknown';
-  const days = Math.ceil((end.getTime() - todayMidnight.getTime()) / 86400000);
-  if (days < 0) return 'Expired';
-  if (days <= 30) return 'Expiring Soon';
-  return 'Active';
-};
-
-const endDateForContract = (contract) =>
-  contract?.expiryDate || contract?.expirationDate || contract?.endDate || contract?.terminationDate || null;
-
-const optionalNumber = (value) => {
-  if (value === null || value === undefined || value === '') return null;
-  const number = Number(value);
-  return Number.isFinite(number) ? number : null;
-};
-
-const normalizePortfolioContract = (contract) => {
-  const endDate = endDateForContract(contract);
-  const status = portfolioStatusForContract({ ...contract, endDate });
-  const value = optionalNumber(contract?.contractValue) ?? optionalNumber(contract?.value);
-  return {
-    ...contract,
-    status,
-    portfolioStatus: status,
-    value,
-    endDate,
-    contractValueDisplay: contract?.contractValueDisplay || null,
-  };
 };
 
 const CONTRACT_PATH_FIELDS = [

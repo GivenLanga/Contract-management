@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { renderDocxPreview } from '../../services/docxPreviewRenderer';
 import { canRenderDocxPreview, getLegalFolderFile } from '../../services/legalFolderFileStore';
@@ -452,6 +452,7 @@ const decorateDocxPages = (root, chrome) => {
 export default function SigningViewer() {
   const { docId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
   const { user } = useAuth();
 
@@ -1372,13 +1373,25 @@ export default function SigningViewer() {
   const finalization = doc?.finalization || {};
   const finalizationComplete = finalization.status === 'finalized';
   const canDownloadCertificate = isMongoId(docId) && (doc?.status === 'Signed' || finalizationComplete);
+  const returnTo = location.state?.returnTo;
+  const handleBack = () => {
+    if (returnTo) {
+      navigate(returnTo);
+      return;
+    }
+    if (typeof window !== 'undefined' && window.history.length > 1 && location.key !== 'default') {
+      navigate(-1);
+      return;
+    }
+    navigate('/signing');
+  };
 
   if (!doc) {
     return (
       <div className="sv-error">
         <h2>Document not found</h2>
         <p>Sync the Legal Folder, then open this signing room again.</p>
-        <button onClick={() => navigate('/signing')}>Back to Signing</button>
+        <button onClick={handleBack}>Back to {location.state?.returnLabel || 'Signing'}</button>
       </div>
     );
   }
@@ -1389,7 +1402,7 @@ export default function SigningViewer() {
   return (
     <div className="sv-root">
       <div className="sv-topbar">
-        <button className="sv-back" onClick={() => navigate('/signing')}>
+        <button className="sv-back" onClick={handleBack}>
           Back
         </button>
         <div className="sv-topbar-doc">

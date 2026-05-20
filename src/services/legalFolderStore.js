@@ -1,5 +1,3 @@
-import { contracts as mockContracts } from '../data/mockData.js';
-
 export const LEGAL_FOLDER_UPDATED = 'legal-folder-updated';
 
 const CONTRACTS_KEY = 'clm_legal_folder_contracts';
@@ -1045,6 +1043,5 @@ export const addDocumentToLegalFolderImport = (doc) => {
 };
 
 export const getContractsForApp = () => {
-  const importedContracts = getLegalFolderImport().contracts;
-  return importedContracts.length ? importedContracts : mockContracts;
+  return getLegalFolderImport().contracts;
 };

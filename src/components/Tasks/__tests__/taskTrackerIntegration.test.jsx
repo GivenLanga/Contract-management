@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -23,6 +23,9 @@ vi.mock('../../../services/api', () => ({
   },
   documents: {
     list: vi.fn(),
+  },
+  signing: {
+    remind: vi.fn(),
   },
 }));
 
@@ -63,15 +66,15 @@ vi.mock('react-router-dom', async () => {
   return { ...actual, useNavigate: () => mockNavigate };
 });
 
-import { tasks as tasksApi, auth as authApi, documents as documentsApi } from '../../../services/api';
-import { retryExcelSync, upsertTrackerTask, updateManualTaskAssignee, createManualWorkflowTask, completeManualTask } from '../../../services/trackerTaskBridge';
+import { tasks as tasksApi, auth as authApi, documents as documentsApi, signing as signingApi } from '../../../services/api';
+import { upsertTrackerTask, createManualWorkflowTask } from '../../../services/trackerTaskBridge';
 import { trackerTasks as trackerTasksStore, manualTasks as manualTasksStore } from '../../../services/legalTrackerStore';
 import { getSigningDocuments } from '../../../services/signingStore';
 import TaskList from '../TaskList';
 
 // ── Auth fixtures ──────────────────────────────────────────────────────────────
-const STAFF_USER   = { user: { _id: 'user-faith', name: 'Faith', role: 'staff' },   isManager: false };
-const MANAGER_USER = { user: { _id: 'mgr-1',     name: 'Manager', role: 'manager' }, isManager: true  };
+const STAFF_USER   = { user: { _id: 'user-faith', name: 'Faith', email: 'faith@example.com', role: 'staff' },   isManager: false };
+const MANAGER_USER = { user: { _id: 'mgr-1',     name: 'Manager', email: 'mgr@example.com', role: 'manager' }, isManager: true  };
 
 // ── localStorage tracker fixtures ─────────────────────────────────────────────
 const LS_TRACKER = {
@@ -136,6 +139,7 @@ const SIGNING_PENDING = {
   signatures:   [],
   signingFields:[{ id: 'f1', required: true, filled: false }, { id: 'f2', required: true, filled: false }],
   preparedBy:   { name: 'Manager', email: 'mgr@example.com', _id: 'mgr-1' },
+  uploadedBy:   { name: 'Faith', email: 'faith@example.com', _id: 'user-faith' },
   updatedAt:    '2026-05-15T10:00:00.000Z',
   auditLogs:    [{ action: 'Envelope sent to 2 signers', performedBy: { name: 'Manager' }, createdAt: '2026-05-15T10:00:00.000Z' }],
 };
@@ -177,6 +181,10 @@ function renderTaskList() {
   return render(<MemoryRouter><TaskList /></MemoryRouter>);
 }
 
+function renderTaskListAt(path) {
+  return render(<MemoryRouter initialEntries={[path]}><TaskList /></MemoryRouter>);
+}
+
 function renderAsManager() {
   mockUseAuth.mockReturnValue(MANAGER_USER);
   return render(<MemoryRouter><TaskList /></MemoryRouter>);
@@ -198,6 +206,7 @@ beforeEach(() => {
   documentsApi.list.mockResolvedValue({ documents: [] });
   tasksApi.list.mockResolvedValue({ tasks: [], total: 0 });
   authApi.users.mockResolvedValue({ users: [] });
+  signingApi.remind.mockResolvedValue({ message: 'Reminder sent.' });
   mockUseAuth.mockReturnValue(STAFF_USER);
 });
 
@@ -433,6 +442,18 @@ it('(tf-4) Unassigned shows items without assignee', async () => {
     expect(document.querySelectorAll('.tl__row').length).toBe(1);
   });
   expect(screen.getAllByText('Unassigned').length).toBeGreaterThanOrEqual(1);
+});
+
+it('(tf-4b) Tasks tab query opens Unassigned directly', async () => {
+  const assigned = { ...LS_TRACKER_ASSIGNED, description: 'Assigned tracker task' };
+  trackerTasksStore.get.mockReturnValue([LS_TRACKER, assigned]);
+  mockUseAuth.mockReturnValue(MANAGER_USER);
+
+  renderTaskListAt('/tasks?tab=unassigned');
+
+  expect(await screen.findByText(LS_TRACKER.description)).toBeInTheDocument();
+  expect(screen.queryByText(assigned.description)).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /^unassigned$/i })).toHaveClass('tl__tab--active');
 });
 
 it('(tf-5) Overdue shows items whose deadline is in the past', async () => {
@@ -700,7 +721,7 @@ it('(sf-5) Signature Follow-Ups excludes Declined docs', async () => {
   expect(screen.queryByText('Declined Contract')).toBeNull();
 });
 
-it('(sf-6) Open Signing button navigates to /signing', async () => {
+it('(sf-6) Open Signing button navigates to the specific signing document view', async () => {
   documentsApi.list.mockResolvedValue({ documents: [SIGNING_PENDING] });
 
   renderTaskList();
@@ -708,7 +729,13 @@ it('(sf-6) Open Signing button navigates to /signing', async () => {
 
   const btn = await screen.findByRole('button', { name: /open signing/i });
   fireEvent.click(btn);
-  expect(mockNavigate).toHaveBeenCalledWith('/signing');
+  expect(mockNavigate).toHaveBeenCalledWith('/signing/view/doc-sig-1', {
+    state: {
+      returnTo: '/tasks?tab=signature-follow-ups',
+      returnTab: 'signature-follow-ups',
+      returnLabel: 'Signature Follow-Ups',
+    },
+  });
 });
 
 it('(sf-7) Local signing docs also shown when server is offline', async () => {
@@ -735,6 +762,232 @@ it('(sf-8) Server docs merged with local — server takes priority, no duplicate
   expect(screen.queryByText('NDA - Local Version')).toBeNull();
   const rows = document.querySelectorAll('.tl__row');
   expect(rows.length).toBe(1);
+});
+
+it('(sf-9) Partial signer progress shows signed and pending states separately', async () => {
+  const partial = {
+    ...SIGNING_PENDING,
+    signers: [
+      { email: 'alice@example.com', name: 'Alice', role: 'Party 1', signingStatus: 'signed', signedAt: '2026-05-16T10:00:00.000Z' },
+      { email: 'bob@example.com', name: 'Bob', role: 'Party 2', signingStatus: 'not_signed' },
+    ],
+  };
+  documentsApi.list.mockResolvedValue({ documents: [partial] });
+
+  renderTaskList();
+  await switchToTab(/signature follow-ups/i);
+
+  expect(await screen.findByText('1/2 signed')).toBeInTheDocument();
+  expect(screen.getByText(/Alice — Party 1 · Signed/i)).toBeInTheDocument();
+  expect(screen.getByText(/Bob — Party 2 · Pending/i)).toBeInTheDocument();
+  expect(screen.getByText('Partially Signed')).toBeInTheDocument();
+  expect(screen.getByText('✓')).toHaveClass('tl__signer-badge--signed');
+});
+
+it('(sf-10) Send Reminder opens confirmation with pending signers only', async () => {
+  const partial = {
+    ...SIGNING_PENDING,
+    signers: [
+      { email: 'alice@example.com', name: 'Alice', role: 'Party 1', signingStatus: 'signed', signedAt: '2026-05-16T10:00:00.000Z' },
+      { email: 'bob@example.com', name: 'Bob', role: 'Party 2', signingStatus: 'not_signed' },
+    ],
+  };
+  documentsApi.list.mockResolvedValue({ documents: [partial] });
+
+  renderTaskList();
+  await switchToTab(/signature follow-ups/i);
+
+  fireEvent.click(await screen.findByRole('button', { name: /send reminder/i }));
+
+  expect(await screen.findByText('Send signature reminder?')).toBeInTheDocument();
+  expect(screen.getByText('bob@example.com')).toBeInTheDocument();
+  expect(screen.queryByText('alice@example.com')).toBeNull();
+});
+
+it('(sf-11) Confirming Send Reminder calls reminder API only for pending signers', async () => {
+  const partial = {
+    ...SIGNING_PENDING,
+    signers: [
+      { email: 'alice@example.com', name: 'Alice', role: 'Party 1', signingStatus: 'signed', signedAt: '2026-05-16T10:00:00.000Z' },
+      { email: 'bob@example.com', name: 'Bob', role: 'Party 2', signingStatus: 'not_signed' },
+    ],
+  };
+  documentsApi.list.mockResolvedValue({ documents: [partial] });
+
+  renderTaskList();
+  await switchToTab(/signature follow-ups/i);
+
+  fireEvent.click(await screen.findByRole('button', { name: /send reminder/i }));
+  const confirmButtons = screen.getAllByRole('button', { name: /^send reminder$/i });
+  fireEvent.click(confirmButtons[confirmButtons.length - 1]);
+
+  await waitFor(() => {
+    expect(signingApi.remind).toHaveBeenCalledWith('doc-sig-1', 'bob@example.com');
+  });
+  expect(signingApi.remind).toHaveBeenCalledTimes(1);
+  expect(signingApi.remind).not.toHaveBeenCalledWith('doc-sig-1', 'alice@example.com');
+  expect(await screen.findByText(/Reminder sent to 1 pending signer/i)).toBeInTheDocument();
+});
+
+it('(sf-12) Send Reminder failure is visible', async () => {
+  signingApi.remind.mockRejectedValue(new Error('Reminder service not configured.'));
+  documentsApi.list.mockResolvedValue({ documents: [SIGNING_PENDING] });
+
+  renderTaskList();
+  await switchToTab(/signature follow-ups/i);
+
+  fireEvent.click(await screen.findByRole('button', { name: /send reminder/i }));
+  const confirmButtons = screen.getAllByRole('button', { name: /^send reminder$/i });
+  fireEvent.click(confirmButtons[confirmButtons.length - 1]);
+
+  expect((await screen.findAllByText('Reminder service not configured.')).length).toBeGreaterThan(0);
+});
+
+it('(sf-13) Fully signed Pending Signature docs are hidden from follow-ups', async () => {
+  const fullySigned = {
+    ...SIGNING_PENDING,
+    _id: 'doc-fully-pending',
+    name: 'Fully signed but stale status',
+    signers: [
+      { email: 'alice@example.com', name: 'Alice', role: 'Party 1', signedAt: '2026-05-16T10:00:00.000Z' },
+      { email: 'bob@example.com', name: 'Bob', role: 'Party 2', hasSigned: true },
+    ],
+  };
+  documentsApi.list.mockResolvedValue({ documents: [fullySigned, SIGNING_PENDING] });
+
+  renderTaskList();
+  await switchToTab(/signature follow-ups/i);
+
+  expect(await screen.findByText('NDA - Acme Corp')).toBeInTheDocument();
+  expect(screen.queryByText('Fully signed but stale status')).toBeNull();
+});
+
+it('(sf-14) Signature Follow-Ups does not render Audit Trail in Actions', async () => {
+  documentsApi.list.mockResolvedValue({ documents: [SIGNING_PENDING] });
+
+  renderAsManager();
+  await switchToTab(/signature follow-ups/i);
+
+  expect(await screen.findByRole('button', { name: /open signing/i })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /audit trail/i })).toBeNull();
+});
+
+it('(sf-15) Prepared By cell shows the preparer name only', async () => {
+  const prepared = { ...SIGNING_PENDING, preparedBy: { name: 'Admin', email: 'admin@example.com' } };
+  documentsApi.list.mockResolvedValue({ documents: [prepared] });
+
+  renderTaskList();
+  await switchToTab(/signature follow-ups/i);
+
+  expect(await screen.findByText('Admin')).toBeInTheDocument();
+  expect(document.querySelector('.tl__owner-role')).toBeNull();
+});
+
+it('(sf-16) Missing preparer displays dash', async () => {
+  const missingPreparer = { ...SIGNING_PENDING, preparedBy: null, uploadedBy: null };
+  documentsApi.list.mockResolvedValue({ documents: [missingPreparer] });
+
+  renderAsManager();
+  await switchToTab(/signature follow-ups/i);
+
+  expect(await screen.findByText('NDA - Acme Corp')).toBeInTheDocument();
+  expect(document.querySelector('.tl__col-owner').textContent).toBe('—');
+});
+
+it('(sf-17) Tasks tab query opens Signature Follow-Ups directly', async () => {
+  documentsApi.list.mockResolvedValue({ documents: [SIGNING_PENDING] });
+
+  renderTaskListAt('/tasks?tab=signature-follow-ups');
+
+  expect(await screen.findByText('NDA - Acme Corp')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /signature follow-ups/i })).toHaveClass('tl__tab--active');
+});
+
+it('(sf-18) Reminder badges render in the right-side signer row slot', async () => {
+  const reminded = {
+    ...SIGNING_PENDING,
+    signers: [
+      { email: 'alice@example.com', name: 'Alice', role: 'Party 1', signingStatus: 'not_signed', lastReminderAt: '2026-05-20T08:00:00.000Z' },
+      { email: 'bob@example.com', name: 'Bob', role: 'Party 2', signingStatus: 'not_signed', lastReminderAt: '2026-05-20T08:00:00.000Z' },
+    ],
+  };
+  documentsApi.list.mockResolvedValue({ documents: [reminded] });
+
+  renderTaskList();
+  await switchToTab(/signature follow-ups/i);
+
+  const signerRows = await screen.findAllByText(/Reminder sent/i);
+  const inlineBadges = signerRows.filter((node) => node.classList.contains('tl__reminded-badge'));
+  expect(inlineBadges).toHaveLength(2);
+  inlineBadges.forEach((badge) => {
+    const row = badge.closest('.tl__signer-line');
+    expect(row.children[0]).toHaveClass('tl__signer-badge');
+    expect(row.children[1]).toHaveClass('tl__signer-main');
+    expect(row.children[2]).toHaveClass('tl__reminded-badge');
+  });
+});
+
+it('(sf-19) Long signer names keep reminder badge separate from signer text', async () => {
+  const reminded = {
+    ...SIGNING_PENDING,
+    signers: [
+      {
+        email: 'long@example.com',
+        name: 'A very long signer name that should not push the reminder badge into the text',
+        role: 'Lender',
+        signingStatus: 'not_signed',
+        lastReminderAt: '2026-05-20T08:00:00.000Z',
+      },
+      { email: 'signed@example.com', name: 'Signed Person', role: 'Borrower', signingStatus: 'signed', signedAt: '2026-05-20T07:00:00.000Z' },
+    ],
+  };
+  documentsApi.list.mockResolvedValue({ documents: [reminded] });
+
+  renderTaskList();
+  await switchToTab(/signature follow-ups/i);
+
+  const longName = await screen.findByText(/A very long signer name/i);
+  expect(longName).toHaveClass('tl__signer-main');
+  expect(longName.nextElementSibling).toHaveClass('tl__reminded-badge');
+  const signedName = screen.getByText(/Signed Person/i);
+  expect(signedName).toHaveClass('tl__signer-main');
+  expect(signedName.nextElementSibling).toHaveClass('tl__reminder-slot');
+});
+
+it('(sf-20) Remind Again button still opens reminder modal', async () => {
+  const reminded = {
+    ...SIGNING_PENDING,
+    signers: [
+      { email: 'alice@example.com', name: 'Alice', role: 'Party 1', signingStatus: 'not_signed', lastReminderAt: '2026-05-20T08:00:00.000Z' },
+      { email: 'bob@example.com', name: 'Bob', role: 'Party 2', signingStatus: 'not_signed' },
+    ],
+  };
+  documentsApi.list.mockResolvedValue({ documents: [reminded] });
+
+  renderTaskList();
+  await switchToTab(/signature follow-ups/i);
+
+  fireEvent.click(await screen.findByRole('button', { name: /remind again/i }));
+  expect(await screen.findByText('Send signature reminder?')).toBeInTheDocument();
+});
+
+it('(sf-21) Signer status badges still show Signed, Pending, and Viewed', async () => {
+  const mixed = {
+    ...SIGNING_PENDING,
+    signers: [
+      { email: 'signed@example.com', name: 'Signed', role: 'Party 1', signingStatus: 'signed', signedAt: '2026-05-20T07:00:00.000Z' },
+      { email: 'viewed@example.com', name: 'Viewed', role: 'Party 2', signingStatus: 'not_signed', viewedAt: '2026-05-20T08:00:00.000Z' },
+      { email: 'pending@example.com', name: 'Pending', role: 'Party 3', signingStatus: 'not_signed' },
+    ],
+  };
+  documentsApi.list.mockResolvedValue({ documents: [mixed] });
+
+  renderTaskList();
+  await switchToTab(/signature follow-ups/i);
+
+  expect(await screen.findByText('✓')).toHaveClass('tl__signer-badge--signed');
+  expect(screen.getByText('Viewed')).toHaveClass('tl__signer-badge--viewed');
+  expect(screen.getByText('Pending')).toHaveClass('tl__signer-badge--pending');
 });
 
 // ═════════════════════════════════════════════════════════════════════════════

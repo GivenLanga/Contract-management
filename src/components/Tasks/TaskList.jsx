@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { tasks as tasksApi, auth as authApi } from '../../services/api';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { tasks as tasksApi, auth as authApi, signing as signingApi } from '../../services/api';
 import { retryExcelSync, completeManualTask } from '../../services/trackerTaskBridge';
 import { trackerTasks as trackerTasksStore, manualTasks as manualTasksStore } from '../../services/legalTrackerStore';
 import {
@@ -10,6 +10,12 @@ import {
   getSignatureFollowUpsForTasksPage,
   calcDueState,
 } from '../../services/workflowTasksSelector';
+import {
+  getDocumentSigningStatus,
+  getPendingReminderSigners,
+  getSignerProgress,
+  selectSentWaitingSigningDocuments,
+} from '../../services/signingDocumentSelectors';
 import { useAuth } from '../../context/AuthContext';
 import { getDaysLabel } from '../../services/dateDisplay';
 import TaskForm from './TaskForm';
@@ -17,6 +23,7 @@ import AssignModal    from '../Workflows/AssignModal';
 import ManualTaskModal from '../Workflows/ManualTaskModal';
 import DoneConfirmModal from '../Workflows/DoneConfirmModal';
 import Header from '../Layout/Header';
+import Modal from '../common/Modal';
 import './TaskList.css';
 
 const TASK_TYPE_LABELS = {
@@ -74,9 +81,30 @@ const TABS = [
   { key: 'completed',  label: 'Completed',            managerOnly: false },
 ];
 
+const TASK_TAB_QUERY = {
+  mine: 'mine',
+  team: 'team',
+  workflow: 'workflow',
+  unassigned: 'unassigned',
+  overdue: 'overdue',
+  approvals: 'approvals',
+  'signature-follow-ups': 'signatures',
+  signatures: 'signatures',
+  completed: 'completed',
+};
+
+const tabFromQuery = (value) => TASK_TAB_QUERY[String(value || '').toLowerCase()] || null;
+
+const SIGNATURE_FOLLOW_UP_RETURN_STATE = {
+  returnTo: '/tasks?tab=signature-follow-ups',
+  returnTab: 'signature-follow-ups',
+  returnLabel: 'Signature Follow-Ups',
+};
+
 export default function TaskList() {
   const { user, isManager } = useAuth();
   const navigate            = useNavigate();
+  const [searchParams]      = useSearchParams();
 
   // ── Local workflow items (localStorage: tracker + manual) ────────────────────
   const [localItems, setLocalItems] = useState([]);
@@ -89,7 +117,7 @@ export default function TaskList() {
   const [signingDocs, setSigningDocs] = useState([]);
 
   // ── UI state ─────────────────────────────────────────────────────────────────
-  const [activeTab, setActiveTab]           = useState('mine');
+  const [activeTab, setActiveTab]           = useState(() => tabFromQuery(searchParams.get('tab')) || 'mine');
   const [search, setSearch]                 = useState('');
   const [completedFilter, setCompletedFilter] = useState('month');
   const [users, setUsers]                   = useState([]);
@@ -103,6 +131,9 @@ export default function TaskList() {
   const [doneTarget, setDoneTarget]         = useState(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
   const [syncFeedback, setSyncFeedback]     = useState({});
+  const [reminderTarget, setReminderTarget] = useState(null);
+  const [reminderSending, setReminderSending] = useState(false);
+  const [signatureFeedback, setSignatureFeedback] = useState({});
 
   // ── Load localStorage items (synchronous) ────────────────────────────────────
   function reloadLocalItems() {
@@ -122,17 +153,17 @@ export default function TaskList() {
   // ── Load signature follow-ups (merged server + local) ────────────────────────
   const loadSignatureFollowUps = useCallback(async () => {
     try {
-      const docs = await getSignatureFollowUpsForTasksPage();
+      const docs = await getSignatureFollowUpsForTasksPage({ user, isManager });
       setSigningDocs(docs);
     } catch {
       // Fallback: local only
       try {
         const { getSigningDocuments } = await import('../../services/signingStore');
         const local = getSigningDocuments();
-        setSigningDocs(local.filter(d => d.status === 'Pending Signature'));
+        setSigningDocs(selectSentWaitingSigningDocuments(local, { user, isManager }));
       } catch { setSigningDocs([]); }
     }
-  }, []);
+  }, [isManager, user]);
 
   // ── Initial mount: load everything ───────────────────────────────────────────
   useEffect(() => {
@@ -141,8 +172,12 @@ export default function TaskList() {
     if (isManager) {
       authApi.users().then(d => setUsers(d.users || [])).catch(() => {});
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isManager, loadSignatureFollowUps]);
+
+  useEffect(() => {
+    const requestedTab = tabFromQuery(searchParams.get('tab'));
+    if (requestedTab && requestedTab !== activeTab) setActiveTab(requestedTab);
+  }, [activeTab, searchParams]);
 
   // ── Load approvals when switching to that tab ─────────────────────────────────
   useEffect(() => {
@@ -151,7 +186,7 @@ export default function TaskList() {
 
   // ── Dev diagnostics ───────────────────────────────────────────────────────────
   useEffect(() => {
-    if (process.env.NODE_ENV === 'production') return;
+    if (import.meta.env.PROD) return;
     if (activeTab === 'workflow') {
       const trackerRaw = trackerTasksStore.get();
       const manualRaw  = manualTasksStore.get();
@@ -191,7 +226,7 @@ export default function TaskList() {
   const kpiStats = useMemo(() => {
     const now       = new Date();
     const eod       = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
-    const weekStart = new Date(Date.now() - 7 * 86400000);
+    const weekStart = new Date(now.getTime() - 7 * 86400000);
 
     const myActive = activeItems.filter(i => i.assignee?.name === user?.name);
 
@@ -227,7 +262,7 @@ export default function TaskList() {
           const dayMap = { week: 7, month: 30, '3months': 90, '6months': 180, year: 365 };
           const days = dayMap[completedFilter];
           if (days) {
-            const cutoff = new Date(Date.now() - days * 86400000);
+            const cutoff = new Date(new Date().getTime() - days * 86400000);
             comp = comp.filter(i => i.completedAt && new Date(i.completedAt) >= cutoff);
           }
         }
@@ -262,6 +297,25 @@ export default function TaskList() {
       );
     });
   }, [activeTab, activeItems, completedItems, approvalTasks, search, completedFilter, user]);
+
+  const visibleSigningDocs = useMemo(() => {
+    if (!search.trim()) return signingDocs;
+    const q = search.toLowerCase();
+    return signingDocs.filter((doc) => {
+      const progress = getSignerProgress(doc);
+      return (
+        (doc.name || '').toLowerCase().includes(q) ||
+        (doc.type || '').toLowerCase().includes(q) ||
+        (doc.status || '').toLowerCase().includes(q) ||
+        (doc.preparedBy?.name || doc.uploadedBy?.name || '').toLowerCase().includes(q) ||
+        progress.signers.some((signer) => (
+          (signer.name || '').toLowerCase().includes(q) ||
+          (signer.email || '').toLowerCase().includes(q) ||
+          (signer.role || '').toLowerCase().includes(q)
+        ))
+      );
+    });
+  }, [search, signingDocs]);
 
   // ── Debug panel data (workflow tab, dev only) ─────────────────────────────────
   const workflowDebugInfo = useMemo(() => {
@@ -357,6 +411,72 @@ export default function TaskList() {
     }
   };
 
+  const updateReminderTimestamps = useCallback((docId, signers, remindedAt) => {
+    const remindedEmails = new Set(signers.map((signer) => String(signer.email || '').toLowerCase()));
+    setSigningDocs((prev) => prev.map((doc) => {
+      if (doc._id !== docId || !Array.isArray(doc.signers)) return doc;
+      return {
+        ...doc,
+        signers: doc.signers.map((signer) => (
+          remindedEmails.has(String(signer.email || '').toLowerCase())
+            ? { ...signer, lastReminderAt: remindedAt }
+            : signer
+        )),
+      };
+    }));
+  }, []);
+
+  const handleConfirmReminder = async () => {
+    if (!reminderTarget) return;
+    const pendingSigners = getPendingReminderSigners(reminderTarget);
+    if (pendingSigners.length === 0) {
+      setSignatureFeedback((prev) => ({
+        ...prev,
+        [reminderTarget._id]: { type: 'info', message: 'All signers have completed signing.' },
+      }));
+      setReminderTarget(null);
+      return;
+    }
+
+    if (typeof signingApi?.remind !== 'function') {
+      setSignatureFeedback((prev) => ({
+        ...prev,
+        [reminderTarget._id]: { type: 'error', message: 'Reminder service not configured.' },
+      }));
+      return;
+    }
+
+    setReminderSending(true);
+    const results = await Promise.allSettled(
+      pendingSigners.map((signer) => signingApi.remind(reminderTarget._id, signer.email))
+    );
+    setReminderSending(false);
+
+    const failed = results
+      .map((result, index) => ({ result, signer: pendingSigners[index] }))
+      .filter(({ result }) => result.status === 'rejected');
+
+    if (failed.length) {
+      const message = failed[0].result.reason?.message || 'Failed to send reminder.';
+      setSignatureFeedback((prev) => ({
+        ...prev,
+        [reminderTarget._id]: { type: 'error', message },
+      }));
+      return;
+    }
+
+    const remindedAt = new Date().toISOString();
+    updateReminderTimestamps(reminderTarget._id, pendingSigners, remindedAt);
+    setSignatureFeedback((prev) => ({
+      ...prev,
+      [reminderTarget._id]: {
+        type: 'success',
+        message: `Reminder sent to ${pendingSigners.length} pending signer${pendingSigners.length === 1 ? '' : 's'}.`,
+      },
+    }));
+    setReminderTarget(null);
+  };
+
   // ── New Task: save to localStorage (ManualTaskModal creates backend task too) ─
   function handleNewTaskSaved(localTask) {
     setShowNewTask(false);
@@ -367,6 +487,8 @@ export default function TaskList() {
   const isSignaturesTab = activeTab === 'signatures';
   const isApprovalsTab  = activeTab === 'approvals';
   const loading         = isApprovalsTab && approvalsLoading;
+  const reminderPendingSigners = reminderTarget ? getPendingReminderSigners(reminderTarget) : [];
+  const reminderFeedback = reminderTarget ? signatureFeedback[reminderTarget._id] : null;
 
   return (
     <div className="tl">
@@ -424,14 +546,12 @@ export default function TaskList() {
                 ))}
               </select>
             )}
-            {!isSignaturesTab && (
-              <input
-                className="tl__search"
-                placeholder="Search tasks, tracker rows, owners…"
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-              />
-            )}
+            <input
+              className="tl__search"
+              placeholder={isSignaturesTab ? 'Search documents, signers…' : 'Search tasks, tracker rows, owners…'}
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
           </div>
         </div>
 
@@ -440,10 +560,10 @@ export default function TaskList() {
           <div className="tl__loading">Loading tasks…</div>
 
         ) : isSignaturesTab ? (
-          signingDocs.length === 0 ? (
+          visibleSigningDocs.length === 0 ? (
             <div className="tl__empty">
               <div className="tl__empty-icon">✅</div>
-              <p>No pending signature requests.</p>
+              <p>{signingDocs.length === 0 ? 'No pending signature requests.' : 'No signature follow-ups match this search.'}</p>
             </div>
           ) : (
             <div className="tl__task-list">
@@ -455,11 +575,13 @@ export default function TaskList() {
                 <span>Status</span>
                 <span>Actions</span>
               </div>
-              {signingDocs.map(doc => (
+              {visibleSigningDocs.map(doc => (
                 <SignatureFollowUpRow
                   key={doc._id}
                   doc={doc}
-                  onOpenSigning={() => navigate('/signing')}
+                  feedback={signatureFeedback[doc._id]}
+                  onOpenSigning={() => navigate(`/signing/view/${doc._id}`, { state: SIGNATURE_FOLLOW_UP_RETURN_STATE })}
+                  onReminderRequest={() => setReminderTarget(doc)}
                 />
               ))}
             </div>
@@ -589,6 +711,66 @@ export default function TaskList() {
           onConfirmed={handleDoneConfirmed}
         />
       )}
+
+      <Modal
+        isOpen={Boolean(reminderTarget)}
+        onClose={() => {
+          if (!reminderSending) setReminderTarget(null);
+        }}
+        title="Send signature reminder?"
+        size="md"
+      >
+        {reminderTarget && (
+          <div className="tl__reminder-modal">
+            <p className="tl__reminder-copy">
+              This will send a reminder to pending signers who have not completed signing.
+            </p>
+            <div className="tl__reminder-document">{reminderTarget.name}</div>
+
+            {reminderPendingSigners.length > 0 ? (
+              <div className="tl__reminder-list">
+                {reminderPendingSigners.map((signer) => (
+                  <div key={signer.email} className="tl__reminder-signer">
+                    <div>
+                      <span className="tl__reminder-name">{signer.name}</span>
+                      <span className="tl__reminder-email">{signer.email}</span>
+                    </div>
+                    <span className="tl__reminder-role">{signer.role}</span>
+                    <span className="tl__signer-badge tl__signer-badge--pending">{signer.status}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="tl__reminder-empty">All signers have completed signing.</div>
+            )}
+
+            {reminderFeedback && (
+              <div className={`tl__signature-feedback tl__signature-feedback--${reminderFeedback.type}`} role="alert">
+                {reminderFeedback.message}
+              </div>
+            )}
+
+            <div className="tl__modal-actions">
+              <button
+                className="tl__action tl__action--edit"
+                type="button"
+                disabled={reminderSending}
+                onClick={() => setReminderTarget(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="tl__action tl__action--remind"
+                type="button"
+                disabled={reminderSending || reminderPendingSigners.length === 0}
+                onClick={handleConfirmReminder}
+              >
+                {reminderSending ? 'Sending…' : 'Send Reminder'}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -719,11 +901,29 @@ function WorkflowItemRow({ item, user, isManager, onDone, onAssign, onOpenWorkfl
 }
 
 // ── Signature Follow-Up row ───────────────────────────────────────────────────
-function SignatureFollowUpRow({ doc, onOpenSigning }) {
-  const totalSigners = doc.signers?.length || doc.signingFields?.filter(f => f.required).length || 0;
-  const signedCount  = doc.signatures?.length || 0;
+function SignatureFollowUpRow({ doc, feedback, onOpenSigning, onReminderRequest }) {
+  const progress = getSignerProgress(doc);
+  const { signedCount, totalSigners, pendingCount } = progress;
+  const pendingReminderSigners = getPendingReminderSigners(doc);
   const sentEntry    = (doc.auditLogs || []).find(l => /sent/i.test(l.action || ''));
   const sentDate     = sentEntry?.createdAt || doc.updatedAt;
+  const preparedBy   = doc.preparedBy || doc.uploadedBy || null;
+  const statusLabel  = getDocumentSigningStatus(doc);
+  const statusClass  = statusLabel === 'Partially Signed'
+    ? 'tl__status-pill--partial'
+    : statusLabel === 'Completed'
+      ? 'tl__status-pill--complete'
+      : 'tl__status-pill--pending-signature';
+  const lastReminderAt = progress.signers
+    .map((signer) => signer.lastReminderAt)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+  const visibleSigners = [
+    ...progress.signers.filter((signer) => !signer.hasSigned),
+    ...progress.signers.filter((signer) => signer.hasSigned),
+  ].slice(0, 6);
+  const hiddenSignerCount = Math.max(0, progress.signers.length - visibleSigners.length);
+  const reminderDisabled = pendingCount === 0 || pendingReminderSigners.length === 0;
 
   return (
     <div className="tl__row">
@@ -735,25 +935,35 @@ function SignatureFollowUpRow({ doc, onOpenSigning }) {
         <span className="tl__task-title">{doc.name}</span>
       </div>
 
-      <div className="tl__col-lr">
+      <div className="tl__col-lr tl__signers-cell">
         <span className="tl__lr-ref">{signedCount}/{totalSigners} signed</span>
-        {(doc.signers || []).slice(0, 2).map(s => (
-          <span key={s.email} className="tl__lr-type">{s.name || s.email} — {s.role}</span>
+        {visibleSigners.map((signer) => (
+          <span
+            key={`${signer.email || signer.name}:${signer.role}`}
+            className={`tl__signer-line${signer.hasSigned ? ' tl__signer-line--signed' : ''}`}
+          >
+            <span className={`tl__signer-badge ${signer.hasSigned ? 'tl__signer-badge--signed' : signer.status === 'Viewed' ? 'tl__signer-badge--viewed' : 'tl__signer-badge--pending'}`}>
+              {signer.hasSigned ? '✓' : signer.status === 'Viewed' ? 'Viewed' : 'Pending'}
+            </span>
+            <span className="tl__signer-main">{signer.name || signer.email} — {signer.role} · {signer.status}</span>
+            {signer.lastReminderAt
+              ? <span className="tl__reminded-badge">Reminder sent</span>
+              : <span className="tl__reminder-slot" aria-hidden="true" />}
+          </span>
         ))}
-        {(doc.signers || []).length > 2 && (
-          <span className="tl__lr-none">+{doc.signers.length - 2} more</span>
+        {hiddenSignerCount > 0 && (
+          <span className="tl__lr-none">+{hiddenSignerCount} more signer{hiddenSignerCount === 1 ? '' : 's'}</span>
         )}
       </div>
 
       <div className="tl__col-owner">
-        {doc.preparedBy ? (
+        {preparedBy ? (
           <>
             <span className="tl__owner-avatar">
-              {doc.preparedBy.name?.charAt(0).toUpperCase() || '?'}
+              {preparedBy.name?.charAt(0).toUpperCase() || '?'}
             </span>
             <div>
-              <span className="tl__owner-name">{doc.preparedBy.name}</span>
-              <span className="tl__owner-role">Prepared by</span>
+              <span className="tl__owner-name">{preparedBy.name || preparedBy.email || '—'}</span>
             </div>
           </>
         ) : <span className="tl__lr-none">—</span>}
@@ -768,8 +978,8 @@ function SignatureFollowUpRow({ doc, onOpenSigning }) {
       </div>
 
       <div className="tl__col-status">
-        <span className="tl__status-pill" style={{ background: '#fff7ed', color: '#c2410c' }}>
-          {doc.status}
+        <span className={`tl__status-pill ${statusClass}`}>
+          {statusLabel}
         </span>
       </div>
 
@@ -777,6 +987,25 @@ function SignatureFollowUpRow({ doc, onOpenSigning }) {
         <button className="tl__action tl__action--workflows" onClick={onOpenSigning}>
           Open Signing
         </button>
+        <button
+          className="tl__action tl__action--remind"
+          disabled={reminderDisabled}
+          title={pendingCount === 0 ? 'All signers have completed signing.' : 'Send reminder to pending signers'}
+          onClick={onReminderRequest}
+        >
+          {lastReminderAt ? 'Remind Again' : 'Send Reminder'}
+        </button>
+        {lastReminderAt && (
+          <span className="tl__action-note">Reminder sent {new Date(lastReminderAt).toLocaleDateString('en-ZA')}</span>
+        )}
+        {pendingCount === 0 && (
+          <span className="tl__action-note">All signers have completed signing.</span>
+        )}
+        {feedback && (
+          <span className={`tl__signature-feedback tl__signature-feedback--${feedback.type}`} role="status">
+            {feedback.message}
+          </span>
+        )}
       </div>
     </div>
   );

@@ -2,8 +2,7 @@
 // Reads the same localStorage stores as Workflows page — ensures both pages see identical data.
 
 import { trackerTasks as trackerTasksStore, manualTasks as manualTasksStore } from './legalTrackerStore';
-import { getSigningDocuments } from './signingStore';
-import { documents as documentsApi } from './api';
+import { getSentWaitingSigningDocuments } from './signingDocumentSelectors';
 
 export function calcDueState(dateVal) {
   if (!dateVal) return 'unknown';
@@ -127,24 +126,5 @@ export function getActiveWorkflowTasksForTasksPage() {
   return loadAllWorkflowItems().filter(isActiveWorkflowItem);
 }
 
-// Merges server documents with local signing records, same logic as SigningDashboard.
-// Returns all docs where status === 'Pending Signature' (the Sent — Waiting set).
-export async function getSignatureFollowUpsForTasksPage() {
-  const localDocs = getSigningDocuments();
-  let serverDocs  = [];
-  try {
-    const data = await documentsApi.list({ limit: 200 });
-    serverDocs  = data.documents || [];
-  } catch {
-    // offline / no server — fall back to local only
-  }
-
-  const merged = new Map();
-  // Server takes priority, same merge strategy as SigningDashboard
-  serverDocs.forEach(doc => merged.set(doc._id, doc));
-  localDocs.forEach(doc => {
-    if (!merged.has(doc._id)) merged.set(doc._id, doc);
-  });
-
-  return Array.from(merged.values()).filter(d => d.status === 'Pending Signature');
-}
+// Signature Follow-Ups intentionally share the same Sent — Waiting selector as Signing.
+export const getSignatureFollowUpsForTasksPage = getSentWaitingSigningDocuments;
